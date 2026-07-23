@@ -1,0 +1,6 @@
+{
+  "name": "appato",
+  "version": "0.1.0",
+  "description": "Build and deploy internal utility apps on appato",
+  "skills": ["./skills/appato/SKILL.md"]
+}
