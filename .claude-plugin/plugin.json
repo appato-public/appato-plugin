@@ -1,6 +1,6 @@
 {
   "name": "appato",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Build and deploy internal utility apps on appato",
   "author": {
     "name": "appato"
