@@ -1,6 +1,7 @@
 ---
 name: appato
 description: Build and deploy small internal web apps ("utilities") on the appato platform. Use whenever the user asks to build, change, or deploy an appato app, or asks for a small internal tool/utility their team can use. Handles creating the app, writing the code, and keeping it deployed via the appato CLI.
+allowed-tools: Bash(appato:*), Bash(~/.appato/bin/appato:*)
 ---
 
 # Building apps on appato
@@ -33,19 +34,26 @@ below the current directory. You never need to be in a special directory.
    1. `command -v appato` (already installed)
    2. `~/.appato/bin/appato` (installed but PATH not refreshed)
    3. Install it — the CLI is a single dependency-free Node script, so
-      installation is one download (never pipe curl to sh; permission
-      systems rightly block that):
-      `mkdir -p ~/.appato/bin && curl -fsSL https://appato.com/cli/appato.mjs -o ~/.appato/bin/appato.mjs`
-      then run it as `node ~/.appato/bin/appato.mjs` (substitute for
-      `appato` in every command below).
+      installation is one download plus a tiny wrapper (never pipe curl to
+      sh; permission systems rightly block that):
+      ```sh
+      mkdir -p "$HOME/.appato/bin" && curl -fsSL https://appato.com/cli/appato.mjs -o "$HOME/.appato/bin/appato.mjs" && printf '#!/bin/sh\nexec node "%s/.appato/bin/appato.mjs" "$@"\n' "$HOME" > "$HOME/.appato/bin/appato" && chmod +x "$HOME/.appato/bin/appato"
+      ```
+      Then use `~/.appato/bin/appato` for every command below — always that
+      same literal prefix, so one permission approval (or allow rule)
+      covers the whole workflow.
    4. If the download fails (network, permissions), use the copy bundled
       with this plugin: `node "${CLAUDE_PLUGIN_ROOT}/bin/appato.mjs"`
       (works in Claude Code and Codex). If it reports it's too old, retry
       step 3 first.
 
-   If a command gets blocked by a permission prompt or classifier, don't
-   work around it with creative shell — tell the user what needs approving
-   and why (one file download to ~/.appato/bin, then running it with node).
+   **When a command is blocked** (permission prompt denied, auto-mode
+   classifier, sandbox): stop — never rephrase or restructure a command to
+   get past a block. Tell the user in your response, every time: which
+   command was blocked, what it does, and their options — approve it, run
+   it themselves, or (for the smoothest experience) add a permission rule
+   for `Bash(appato:*)` / `Bash(~/.appato/bin/appato:*)` via /permissions
+   or .claude/settings.json so every appato command is covered once.
 
    **Logging in**: if any command says the user isn't logged in, try
    `appato login` (it opens the browser for approval). Permission systems
