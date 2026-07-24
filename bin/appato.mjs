@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -42,7 +42,7 @@ try {
     case "clone": await clone(args); break;
     case "push": await push(args); break;
     case "sync": await sync(args); break;
-    case "history": await history(args.includes("--json")); break;
+    case "history": await history(args); break;
     case "cron": case "crons": await cron(args); break;
     case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
@@ -81,7 +81,9 @@ usage:
   appato push -m "..." [--details "..."]
                             upload the app and deploy; also syncs
                             title/description from appato.json
-  appato history [--json]   list versions with their change summaries
+  appato history [--json] [--all]  list versions with their change summaries
+                            (newest 50 by default; --all walks every page
+                            your plan's history window retains)
   appato cron [--json]      list the app's schedules, next runs, last results
   appato cron run <name>    run a schedule now (test it without waiting)
   appato cron pause|resume <name>
@@ -664,24 +666,39 @@ async function rollback(args = []) {
   console.log(`APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`);
 }
 
-async function history(json = false) {
+async function history(args = []) {
+  const json = args.includes("--json");
+  const all = args.includes("--all");
   const { org, app } = appConfig();
-  const res = await apiFetch(`/api/apps/${org}/${app}/versions`);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
+  // The server pages at 50 (nextBefore = the id cursor for the next older
+  // page); --all walks the pages until the plan's history window runs out.
+  // The cursor strictly decreases, so this always terminates.
+  const versions = [];
+  let cursor = 0;
+  let truncated = false;
+  do {
+    const res = await apiFetch(
+      `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
+    );
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
+    versions.push(...body.versions);
+    truncated = !all && !!body.nextBefore;
+    cursor = all ? (body.nextBefore ?? 0) : 0;
+  } while (cursor);
   if (json) {
-    console.log(JSON.stringify(body.versions));
+    console.log(JSON.stringify(versions));
     return;
   }
-  for (const v of body.versions) {
+  for (const v of versions) {
     const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
     console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
   }
-  // Server pages at 50 (nextBefore = cursor for older). Rollback accepts any
-  // version id, so older targets still work — this is a discovery hint only.
-  if (body.nextBefore) {
-    console.log(`… older versions exist — see the full history in the console`);
+  // Rollback accepts any version id, so older targets work either way —
+  // this is a discovery hint only.
+  if (truncated) {
+    console.log(`… older versions exist — run: appato history --all`);
   }
 }
 
