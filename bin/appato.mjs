@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -44,7 +44,8 @@ try {
     case "history": await history(args.includes("--json")); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
-    case "upgrade": upgrade(); break;
+    case "install": await install(); break;
+    case "upgrade": await install(); break;
     case "--version": case "version": console.log(VERSION); break;
     default: usage(); process.exit(command ? 1 : 0);
   }
@@ -75,7 +76,8 @@ usage:
                             title/description from appato.json
   appato history [--json]   list versions with their change summaries
   appato logs               (soon) tail the app's logs
-  appato upgrade            update the CLI to the latest version`);
+  appato install            install/update the CLI into ~/.appato/bin
+  appato upgrade            same as install (update to the latest version)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,17 +538,41 @@ async function workspaceStatus(json = false, all = false) {
   }
 }
 
-function upgrade() {
-  console.log("Upgrading appato CLI…");
-  const self = new URL(import.meta.url).pathname;
-  if (self.includes("/.appato/bin/")) {
-    // Self-hosted install: re-fetch the latest script from the platform.
-    execSync(`curl -fsSL ${DEFAULT_HOST}/cli/appato.mjs -o "${self}"`, { stdio: "inherit" });
-    console.log(`Updated ${self} → v${execSync(`node "${self}" --version`).toString().trim()}`);
-  } else {
-    // npm-installed (future) or dev checkout.
-    execSync("npm install -g appato@latest", { stdio: "inherit" });
+/**
+ * Install (or update) the CLI into ~/.appato/bin — used both as
+ * `appato upgrade` from an installed copy and as the bootstrap path from the
+ * plugin-bundled copy (`node "$CLAUDE_PLUGIN_ROOT/bin/appato.mjs" install`),
+ * so skills never need curl/chmod shell of their own. Fetches the latest
+ * script from the platform; falls back to copying this file's own bytes
+ * when offline.
+ */
+async function install() {
+  const binDir = join(homedir(), ".appato", "bin");
+  const target = join(binDir, "appato.mjs");
+  mkdirSync(binDir, { recursive: true });
+
+  let source = "latest from " + DEFAULT_HOST;
+  try {
+    const res = await fetch(`${DEFAULT_HOST}/cli/appato.mjs`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    writeFileSync(target, await res.text());
+  } catch {
+    // Offline / blocked: self-copy so the bundled plugin CLI still installs.
+    const self = new URL(import.meta.url).pathname;
+    if (self === target) throw new Error("could not reach " + DEFAULT_HOST + " to update");
+    writeFileSync(target, readFileSync(self));
+    source = "bundled copy (offline — run `appato upgrade` later for the latest)";
   }
+
+  const wrapper = join(binDir, "appato");
+  writeFileSync(wrapper, `#!/bin/sh\nexec node "${target}" "$@"\n`, { mode: 0o755 });
+
+  const version = execSync(`node "${target}" --version`).toString().trim();
+  console.log(`Installed appato v${version} (${source}) → ${wrapper}`);
+  if (!(process.env.PATH ?? "").split(":").includes(binDir)) {
+    console.log(`Not on PATH — use ${wrapper} directly, or add: export PATH="$HOME/.appato/bin:$PATH"`);
+  }
+  console.log(`APPATO_INSTALLED version=${version} path=${JSON.stringify(wrapper)}`);
 }
 
 // ---------------------------------------------------------------------------

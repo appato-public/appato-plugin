@@ -33,19 +33,13 @@ below the current directory. You never need to be in a special directory.
 1. **Bootstrap** — find a working `appato`, in this order:
    1. `command -v appato` (already installed)
    2. `~/.appato/bin/appato` (installed but PATH not refreshed)
-   3. Install it — the CLI is a single dependency-free Node script, so
-      installation is one download plus a tiny wrapper (never pipe curl to
-      sh; permission systems rightly block that):
-      ```sh
-      mkdir -p "$HOME/.appato/bin" && curl -fsSL https://appato.com/cli/appato.mjs -o "$HOME/.appato/bin/appato.mjs" && printf '#!/bin/sh\nexec node "%s/.appato/bin/appato.mjs" "$@"\n' "$HOME" > "$HOME/.appato/bin/appato" && chmod +x "$HOME/.appato/bin/appato"
-      ```
-      Then use `~/.appato/bin/appato` for every command below — always that
-      same literal prefix, so one permission approval (or allow rule)
-      covers the whole workflow.
-   4. If the download fails (network, permissions), use the copy bundled
-      with this plugin: `node "${CLAUDE_PLUGIN_ROOT}/bin/appato.mjs"`
-      (works in Claude Code and Codex). If it reports it's too old, retry
-      step 3 first.
+   3. Install it with the copy bundled in this plugin — one command, no
+      shell scripting:
+      `node "${CLAUDE_PLUGIN_ROOT}/bin/appato.mjs" install`
+      (works in Claude Code and Codex; fetches the latest CLI, or installs
+      its own copy when offline). Then use `~/.appato/bin/appato` for every
+      command below — always that same literal prefix, so one permission
+      approval (or allow rule) covers the whole workflow.
 
    **When a command is blocked** (permission prompt denied, auto-mode
    classifier, sandbox): stop — never rephrase or restructure a command to
