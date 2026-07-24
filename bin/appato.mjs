@@ -2,14 +2,28 @@
 // appato CLI — a deliberately thin REST client. All real logic is server-side;
 // this walks files, holds a token, and relays deploy results. Agents drive it
 // (see the appato skill), so stdout messages are written for them too.
+//
+// Anchoring: commands find their app by walking UP from cwd to the nearest
+// appato.json (the app root). With no app above, `status` instead looks one
+// level DOWN for checked-out apps and lists the org's apps — so launching in
+// an app, a subdir of an app, or a directory of apps all orient correctly.
+// There is no other state: no registry, no markers, no hidden files.
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  existsSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -24,7 +38,9 @@ try {
     case "logout": logout(); break;
     case "whoami": await whoami(); break;
     case "create": await create(args); break;
+    case "clone": await clone(args); break;
     case "push": await push(args); break;
+    case "sync": await sync(args); break;
     case "history": await history(args.includes("--json")); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
@@ -44,13 +60,18 @@ usage:
   appato login              authenticate this machine (opens browser)
   appato logout             remove stored credentials
   appato whoami             show the signed-in user and orgs
+  appato status [--json]    inside an app: deploy status, URL, local drift
+                            elsewhere: list the org's apps + local checkouts
   appato create <slug> --title "..." --description "..."  [--org <slug>]
-                            create an app (writes appato.json here)
+                            create an app in a new ./<slug>/ directory
+  appato clone <slug> [dir] [--org <slug>]
+                            check out an existing app into ./<slug>/
+  appato sync [--force]     update local files to the latest pushed version
+                            (refuses to discard unpushed local changes)
   appato push -m "..." [--details "..."]
-                            upload current directory and deploy; also syncs
+                            upload the app and deploy; also syncs
                             title/description from appato.json
   appato history [--json]   list versions with their change summaries
-  appato status [--json]    show deploy status, URL, and local drift
   appato logs               (soon) tail the app's logs
   appato upgrade            update the CLI to the latest version`);
 }
@@ -151,6 +172,50 @@ function semverLt(a, b) {
 }
 
 // ---------------------------------------------------------------------------
+// anchoring
+
+/** Nearest ancestor directory (including cwd) containing appato.json. */
+function findAppRoot(from = process.cwd()) {
+  let dir = from;
+  while (true) {
+    if (existsSync(join(dir, "appato.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function appConfig() {
+  const root = findAppRoot();
+  if (!root) {
+    throw new Error(
+      "not inside an appato app (no appato.json here or above) — " +
+        "run `appato status` to see your org's apps, `appato clone <slug>` to check one out, " +
+        "or `appato create <slug>` to start a new one",
+    );
+  }
+  const config = JSON.parse(readFileSync(join(root, "appato.json"), "utf8"));
+  return { ...config, root };
+}
+
+/** Immediate child directories of `base` that are app checkouts. */
+function scanChildApps(base) {
+  const out = [];
+  for (const entry of readdirSync(base)) {
+    if (entry.startsWith(".") || IGNORE.has(entry)) continue;
+    const manifest = join(base, entry, "appato.json");
+    try {
+      if (!statSync(join(base, entry)).isDirectory() || !existsSync(manifest)) continue;
+      const m = JSON.parse(readFileSync(manifest, "utf8"));
+      if (m.org && m.app) out.push({ org: m.org, app: m.app, dir: entry });
+    } catch {
+      // unreadable entry — not a checkout
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // commands
 
 async function whoami() {
@@ -175,49 +240,98 @@ async function create(args) {
       'usage: appato create <slug> --title "Human Title" --description "One or two sentences: what the app does and who it\'s for" [--org <org>]',
     );
   }
+  const inside = findAppRoot();
+  if (inside) {
+    throw new Error(
+      `already inside an appato app (${inside}) — apps don't nest; cd out and create it as a sibling`,
+    );
+  }
+  // Directory = bare app slug. If cwd is already named after the app (the
+  // "mkdir first" habit), use it; otherwise create ./<slug>/.
+  const dir = basename(process.cwd()) === slug ? process.cwd() : join(process.cwd(), slug);
+  if (dir !== process.cwd() && existsSync(dir) && readdirSync(dir).length > 0) {
+    throw new Error(`./${slug}/ already exists and is not empty`);
+  }
   const res = await apiFetch("/api/apps", {
     method: "POST",
     body: JSON.stringify({ slug, org, title, description }),
   });
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `create failed (${res.status})`);
+  mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(process.cwd(), "appato.json"),
+    join(dir, "appato.json"),
     JSON.stringify({ org: body.org, app: body.slug, title, description }, null, 2) + "\n",
   );
-  console.log(`Created ${body.org}/${body.slug} — "${title}"`);
+  const rel = relative(process.cwd(), dir) || ".";
+  console.log(`Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`);
   console.log(`URL (after first push): ${body.url}`);
+  console.log(`APPATO_CREATED app=${body.org}/${body.slug} dir=${JSON.stringify(rel)} url=${body.url}`);
 }
 
-async function history(json = false) {
-  const { org, app } = appConfig();
-  const res = await apiFetch(`/api/apps/${org}/${app}/versions`);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
-  if (json) {
-    console.log(JSON.stringify(body.versions));
+async function clone(args) {
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith("-")) i++;
+    else positionals.push(args[i]);
+  }
+  const slug = positionals[0];
+  const orgFlag = flagValue(args, "--org");
+  if (!slug) throw new Error("usage: appato clone <slug> [dir] [--org <org>]");
+  const inside = findAppRoot();
+  if (inside) {
+    throw new Error(`already inside an appato app (${inside}) — apps don't nest; cd out first`);
+  }
+
+  const listRes = await apiFetch(`/api/apps${orgFlag ? `?org=${encodeURIComponent(orgFlag)}` : ""}`);
+  const listBody = await listRes.json();
+  if (!listRes.ok) throw new Error(listBody.error || `clone failed (${listRes.status})`);
+  const org = listBody.org;
+  const record = listBody.apps.find((a) => a.slug === slug);
+  if (!record) {
+    throw new Error(`no app "${slug}" in ${org} — run \`appato status\` to list available apps`);
+  }
+
+  const existing = scanChildApps(process.cwd()).find((c) => c.org === org && c.app === slug);
+  if (existing) {
+    console.log(`${org}/${slug} is already checked out at ./${existing.dir}/ — cd in and run: appato sync`);
+    console.log(`APPATO_CLONED app=${org}/${slug} dir=${JSON.stringify(existing.dir)} existing=true`);
     return;
   }
-  for (const v of body.versions) {
-    const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
-    console.log(`${flag} v${v.id}  ${ago(v.createdAt)} ago  ${v.message || "(no message)"}`);
-    if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
+
+  const dir = join(process.cwd(), positionals[1] || slug);
+  if (existsSync(dir) && readdirSync(dir).length > 0) {
+    throw new Error(`${relative(process.cwd(), dir)}/ already exists and is not empty`);
   }
+  const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
+  const state = await stateRes.json();
+  if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
+
+  mkdirSync(dir, { recursive: true });
+  writeFiles(dir, state.files ?? {});
+  writeFileSync(
+    join(dir, "appato.json"),
+    JSON.stringify(
+      { org, app: slug, title: record.name || slug, description: record.description || "" },
+      null,
+      2,
+    ) + "\n",
+  );
+  const rel = relative(process.cwd(), dir);
+  const fileCount = Object.keys(state.files ?? {}).length;
+  console.log(
+    state.latestVersion > 0
+      ? `Cloned ${org}/${slug} v${state.latestVersion} (${fileCount} files) → ./${rel}/`
+      : `Cloned ${org}/${slug} (no versions pushed yet) → ./${rel}/`,
+  );
+  console.log(`APPATO_CLONED app=${org}/${slug} version=${state.latestVersion} dir=${JSON.stringify(rel)} url=${state.url}`);
 }
 
-function appConfig() {
-  const path = join(process.cwd(), "appato.json");
-  if (!existsSync(path)) {
-    throw new Error("no appato.json here — run: appato create <slug>");
-  }
-  return JSON.parse(readFileSync(path, "utf8"));
-}
-
-// The final APPATO_* line of push/status is a stable machine contract for
+// The final APPATO_* line of push/sync/status is a stable machine contract for
 // driving agents (see SKILL.md): space-separated key=value pairs, values
 // JSON-encoded when they may contain spaces. Don't reword these lines.
 async function push(args = []) {
-  const { org, app, title, description } = appConfig();
+  const { org, app, title, description, root } = appConfig();
   const message = flagValue(args, "-m") ?? flagValue(args, "--message");
   const details = flagValue(args, "--details") ?? "";
   if (!message) {
@@ -225,7 +339,7 @@ async function push(args = []) {
       'a change summary is required: appato push -m "one-line, user-facing summary" [--details "a short paragraph: what changed for users, why, and any notable decisions"]',
     );
   }
-  const files = collectFiles(process.cwd());
+  const files = collectFiles(root);
   if (Object.keys(files).length === 0) throw new Error("no files to push");
   const sha = filesSha(files);
   const res = await apiFetch(`/api/apps/${org}/${app}/push`, {
@@ -246,13 +360,91 @@ async function push(args = []) {
   console.log(`APPATO_DEPLOYED app=${org}/${app} version=${body.version} sha=${sha} url=${body.url}`);
 }
 
+async function sync(args = []) {
+  const { org, app, root } = appConfig();
+  const force = args.includes("--force");
+  const res = await apiFetch(`/api/apps/${org}/${app}`);
+  const state = await res.json();
+  if (!res.ok) throw new Error(state.error || `sync failed (${res.status})`);
+  const remote = state.files ?? {};
+  const local = collectFiles(root);
+  const localSha = filesSha(local);
+  const remoteSha = filesSha(remote);
+
+  if (localSha === remoteSha) {
+    console.log(`Already up to date (v${state.latestVersion}).`);
+    console.log(`APPATO_SYNCED app=${org}/${app} version=${state.latestVersion} changed=false sha=${remoteSha}`);
+    return;
+  }
+
+  if (!force) {
+    // Safe to overwrite only if the local copy is exactly some pushed version
+    // (then nothing would be lost — it's all in history). Otherwise there are
+    // unpushed local edits and sync must not discard them.
+    const vres = await apiFetch(`/api/apps/${org}/${app}/versions`);
+    const vbody = await vres.json();
+    if (!vres.ok) throw new Error(vbody.error || `sync failed (${vres.status})`);
+    const match = vbody.versions.find((v) => v.sha === localSha);
+    if (!match && Object.keys(local).length > 0) {
+      const changed = diffFiles(local, remote);
+      console.error(`✗ local files don't match any pushed version — syncing would discard changes in:`);
+      for (const p of changed) console.error(`    ${p}`);
+      console.error(`Push them first (appato push -m "...") or discard them: appato sync --force`);
+      console.log(`APPATO_SYNC_BLOCKED app=${org}/${app} latest_version=${state.latestVersion} local_sha=${localSha}`);
+      process.exit(2);
+    }
+  }
+
+  const changed = diffFiles(local, remote);
+  writeFiles(root, remote);
+  for (const path of Object.keys(local)) {
+    if (!(path in remote)) unlinkSync(join(root, path));
+  }
+  console.log(`✓ synced to v${state.latestVersion} — ${changed.length} file(s) changed`);
+  console.log(`APPATO_SYNCED app=${org}/${app} version=${state.latestVersion} changed=true files=${changed.length} sha=${remoteSha}`);
+}
+
+async function history(json = false) {
+  const { org, app } = appConfig();
+  const res = await apiFetch(`/api/apps/${org}/${app}/versions`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
+  if (json) {
+    console.log(JSON.stringify(body.versions));
+    return;
+  }
+  for (const v of body.versions) {
+    const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
+    console.log(`${flag} v${v.id}  ${ago(v.createdAt)} ago  ${v.message || "(no message)"}`);
+    if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
+  }
+}
+
 async function status(json = false) {
+  const root = findAppRoot();
+  if (!root) return workspaceStatus(json);
+
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}`);
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
-  const local = collectFiles(process.cwd());
+  const local = collectFiles(root);
+  const localSha = filesSha(local);
   const changedFiles = diffFiles(local, body.files ?? {});
+  const dirty = changedFiles.length > 0;
+
+  // Distinguish "behind" (local equals an older pushed version — sync) from
+  // "modified" (unpushed local edits — push) via version content hashes.
+  let syncState = "in_sync";
+  let matchesVersion = body.latestVersion;
+  if (dirty) {
+    const vres = await apiFetch(`/api/apps/${org}/${app}/versions`);
+    const vbody = await vres.json();
+    const match = vres.ok ? vbody.versions.find((v) => v.sha === localSha) : undefined;
+    syncState = match ? "behind" : "modified";
+    matchesVersion = match ? match.id : null;
+  }
+
   const out = {
     app: `${org}/${app}`,
     url: body.url,
@@ -261,9 +453,11 @@ async function status(json = false) {
     latestVersion: body.latestVersion,
     deployedVersion: body.deployedVersion ?? null,
     deployedAt: body.deployedAt ?? null,
-    dirty: changedFiles.length > 0,
+    dirty,
+    syncState,
+    matchesVersion,
     changedFiles,
-    localSha: filesSha(local),
+    localSha,
   };
   if (json) {
     console.log(JSON.stringify(out));
@@ -273,10 +467,48 @@ async function status(json = false) {
   console.log(`url:      ${out.url}`);
   console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
   console.log(`version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)} ago)` : ""}` : "never"}`);
-  console.log(out.dirty
-    ? `local:    ⚠ ${changedFiles.length} file(s) differ from pushed version — run: appato push`
-    : `local:    in sync with pushed version`);
-  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} sha=${out.localSha} url=${out.url}`);
+  if (!dirty) {
+    console.log(`local:    in sync with pushed version`);
+  } else if (syncState === "behind") {
+    console.log(`local:    ⚠ behind — local matches v${matchesVersion}, latest is v${out.latestVersion}; run: appato sync`);
+  } else {
+    console.log(`local:    ⚠ ${changedFiles.length} file(s) with unpushed changes — run: appato push`);
+  }
+  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} sha=${out.localSha} url=${out.url}`);
+}
+
+/** `status` outside any app: org app list + local checkouts one level down. */
+async function workspaceStatus(json = false) {
+  const res = await apiFetch("/api/apps");
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
+  const local = scanChildApps(process.cwd());
+  const localByApp = new Map(local.map((c) => [`${c.org}/${c.app}`, c.dir]));
+  const apps = body.apps.map((a) => ({
+    slug: a.slug,
+    title: a.name,
+    dir: localByApp.get(`${body.org}/${a.slug}`) ?? null,
+  }));
+  if (json) {
+    console.log(JSON.stringify({ org: body.org, apps }));
+    return;
+  }
+  if (apps.length === 0) {
+    console.log(`No apps in ${body.org} yet — start one: appato create <slug> --title "..." --description "..."`);
+  } else {
+    console.log(`Apps in ${body.org} (● = checked out below this directory):`);
+    for (const a of apps) {
+      console.log(
+        a.dir
+          ? `  ● ${a.slug}  ${a.title}  → ./${a.dir}/`
+          : `  ○ ${a.slug}  ${a.title}  (appato clone ${a.slug})`,
+      );
+    }
+  }
+  console.log(`APPATO_WORKSPACE org=${body.org} apps=${apps.length} checked_out=${apps.filter((a) => a.dir).length}`);
+  for (const a of apps) {
+    console.log(`APPATO_APP app=${body.org}/${a.slug} dir=${a.dir ? JSON.stringify("./" + a.dir) : "none"}`);
+  }
 }
 
 function upgrade() {
@@ -315,7 +547,24 @@ function collectFiles(root) {
   return files;
 }
 
-/** Deterministic short hash of a file set (path + content, sorted). */
+/** Write a {path: content} file set under root, refusing unsafe paths. */
+function writeFiles(root, files) {
+  for (const [path, content] of Object.entries(files)) {
+    if (path.startsWith("/") || path.split(/[\\/]/).includes("..")) {
+      console.error(`skipping unsafe path: ${path}`);
+      continue;
+    }
+    const full = join(root, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content);
+  }
+}
+
+/**
+ * Deterministic short hash of a file set (path + content, sorted).
+ * MUST stay byte-identical to filesSha() in src/hash.ts on the server — sync
+ * compares this against version shas from the API.
+ */
 function filesSha(files) {
   const h = createHash("sha256");
   for (const path of Object.keys(files).sort()) {
