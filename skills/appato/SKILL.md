@@ -46,8 +46,14 @@ below the current directory. You never need to be in a special directory.
    If a command gets blocked by a permission prompt or classifier, don't
    work around it with creative shell — tell the user what needs approving
    and why (one file download to ~/.appato/bin, then running it with node).
-   If any command says the user isn't logged in, run `appato login` and
-   tell the user to approve it in their browser.
+
+   **Logging in**: if any command says the user isn't logged in, try
+   `appato login` (it opens the browser for approval). Permission systems
+   often block agents from running auth commands — that's correct behavior,
+   not an error to work around. In that case give the user the exact
+   command to run in their own terminal:
+   `~/.appato/bin/appato login` (or `appato login` if on PATH),
+   ask them to say when they've approved it, then continue.
 2. **Orient**: run `appato status` before anything else. Outside an app it
    lists the user's own apps and which are checked out below the current
    directory (`--all` lists the whole org — use it when looking for a
