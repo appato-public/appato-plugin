@@ -4,8 +4,12 @@ The distributable bundle installed into users' coding agents:
 
 - `skills/appato/SKILL.md` — the workflow (open agent-skills standard; loaded
   by both Claude Code and Codex)
-- `bin/appato.mjs` — bundled copy of the CLI, the last-resort fallback when
-  installing to `~/.appato/bin` fails (synced from `cli/` by `npm run sync:cli`)
+- `bin/appato` + `bin/appato.mjs` — the CLI. Claude Code (>=2.1.91) puts
+  plugin `bin/` on the Bash tool's PATH, so `appato` is a bare command with
+  no install step; the `.mjs` is synced from `cli/` by `npm run sync:cli`.
+  In Codex (no PATH mechanism) the skill installs it to `~/.appato/bin` via
+  `node bin/appato.mjs install`. Credentials/state always live in
+  `~/.appato/` — never in the plugin dir, which changes on every update.
 - `.claude-plugin/plugin.json` — Claude Code plugin manifest
 - `.claude-plugin/marketplace.json` — single-repo marketplace manifest; this
   is what lets Codex (and Claude Code, if pointed straight at the repo)
@@ -38,4 +42,34 @@ Install (Codex):
 ```
 codex plugin marketplace add https://github.com/appato-public/appato-plugin.git
 codex plugin add appato@appato
+```
+
+## Fewer permission prompts (optional)
+
+Claude Code — one narrow allow rule covers every appato command, and it
+survives auto mode (narrow rules resolve before the classifier):
+
+```json
+// ~/.claude/settings.json
+{
+  "permissions": { "allow": ["Bash(appato *)"] },
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "Org-specific CLIs: appato — deploys small internal web apps to appato.com"
+    ]
+  }
+}
+```
+
+Codex — experimental rules file (auto-allows only plain-word invocations;
+anything with variables or redirects still prompts):
+
+```python
+# ~/.codex/rules/default.rules
+prefix_rule(
+    pattern = ["appato"],
+    decision = "allow",
+    justification = "appato CLI: deploys internal web apps",
+)
 ```

@@ -1,7 +1,7 @@
 ---
 name: appato
 description: Build and deploy small internal web apps ("utilities") on the appato platform. Use whenever the user asks to build, change, or deploy an appato app, or asks for a small internal tool/utility their team can use. Handles creating the app, writing the code, and keeping it deployed via the appato CLI.
-allowed-tools: Bash(appato:*), Bash(~/.appato/bin/appato:*)
+allowed-tools: Bash(appato *)
 ---
 
 # Building apps on appato
@@ -31,33 +31,38 @@ below the current directory. You never need to be in a special directory.
 ## Workflow
 
 1. **Bootstrap** — find a working `appato`, in this order:
-   1. `command -v appato` (already installed)
-   2. `~/.appato/bin/appato` (installed but PATH not refreshed)
+   1. `command -v appato` — in Claude Code this plugin puts `appato` on
+      the Bash tool's PATH, so it's normally just available; verify with
+      `appato --version` and use bare `appato` for every command below.
+   2. `~/.appato/bin/appato` (self-installed copy; PATH not refreshed)
    3. Install it with the copy bundled in this plugin — one command, no
       shell scripting:
       `node "${CLAUDE_PLUGIN_ROOT}/bin/appato.mjs" install`
-      (works in Claude Code and Codex; fetches the latest CLI, or installs
-      its own copy when offline). Then use `~/.appato/bin/appato` for every
-      command below — always that same literal prefix, so one permission
-      approval (or allow rule) covers the whole workflow.
+      then use `~/.appato/bin/appato`. This is the normal path in Codex
+      (which doesn't put plugin binaries on PATH). Note for Codex: this
+      writes to ~/.appato (outside the workspace) and fetches from the
+      network, so Codex will ask to run it outside the sandbox — that's
+      expected, once per machine; tell the user so it doesn't read as an
+      error.
 
    **When a command is blocked** (permission prompt denied, auto-mode
    classifier, sandbox): stop — never rephrase or restructure a command to
    get past a block. Tell the user in your response, every time: which
    command was blocked, what it does, and their options — approve it, run
    it themselves, or (for the smoothest experience) add a permission rule
-   for `Bash(appato:*)` / `Bash(~/.appato/bin/appato:*)` via /permissions
-   or .claude/settings.json so every appato command is covered once.
+   for `Bash(appato *)` via /permissions or settings so every appato
+   command is covered once.
 
    **Logging in**: if any command says the user isn't logged in, run
-   `~/.appato/bin/appato login --no-wait` — it prints an approval URL and
-   exits immediately (no long-running process to time out). Share the URL,
+   `appato login --no-wait` — it prints an approval URL and exits
+   immediately (no long-running process to time out). Share the URL,
    ask the user to approve in their browser, and after they confirm run any
    appato command (start with `whoami`) — the CLI completes the pending
    login automatically; approval order never matters. If even that is
    blocked by the permission system, that's correct behavior, not an error
-   to work around: give the user `~/.appato/bin/appato login` to run in
-   their own terminal and continue once they confirm.
+   to work around: give the user `appato login` (with its full path if not
+   on their shell PATH) to run in their own terminal and continue once
+   they confirm.
 2. **Orient**: run `appato status` before anything else. Outside an app it
    lists the user's own apps and which are checked out below the current
    directory (`--all` lists the whole org — use it when looking for a
