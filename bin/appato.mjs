@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.6";
+const VERSION = "0.2.7";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -43,6 +43,7 @@ try {
     case "push": await push(args); break;
     case "sync": await sync(args); break;
     case "history": await history(args.includes("--json")); break;
+    case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
     case "sdk": case "howto": case "docs": sdkHelp(); break;
@@ -80,6 +81,9 @@ usage:
                             upload the app and deploy; also syncs
                             title/description from appato.json
   appato history [--json]   list versions with their change summaries
+  appato rollback <version> restore a previous version's files as a new
+                            version and deploy it (nothing is lost —
+                            history is append-only; see appato history)
   appato sdk                how to build apps: platform APIs (storage,
                             realtime, identity), conventions, recipes
   appato logs               (soon) tail the app's logs
@@ -540,6 +544,35 @@ async function sync(args = []) {
   }
   console.log(`✓ synced to v${state.latestVersion} — ${changed.length} file(s) changed`);
   console.log(`APPATO_SYNCED app=${org}/${app} version=${state.latestVersion} changed=true files=${changed.length} sha=${remoteSha}`);
+}
+
+async function rollback(args = []) {
+  const { org, app } = appConfig();
+  const raw = args.find((a) => /^v?\d+$/.test(a));
+  const target = raw ? Number(raw.replace(/^v/, "")) : NaN;
+  if (!Number.isInteger(target) || target < 1) {
+    throw new Error('usage: appato rollback <version> — pick one from appato history');
+  }
+  const res = await apiFetch(`/api/apps/${org}/${app}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ version: target }),
+  });
+  const body = await res.json();
+  if (res.status === 422) {
+    console.error(`✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`);
+    console.error("The previously deployed version keeps serving.");
+    console.log(`APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} error=${JSON.stringify(body.deployError ?? "unknown")}`);
+    process.exit(2);
+  }
+  if (!res.ok) throw new Error(body.error || `rollback failed (${res.status})`);
+  // `restored` is the version that authored the content — it differs from
+  // the target when the target was itself a rollback (server resolves to
+  // the origin so rollback chains never form).
+  const restored = body.restored ?? target;
+  const what = restored === target ? `v${target}` : `v${restored}'s code, via v${target}`;
+  console.log(`✓ rolled back — v${body.version} now live (restored ${what}) → ${body.url}`);
+  console.log(`Local files are now behind the new version; run: appato sync`);
+  console.log(`APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`);
 }
 
 async function history(json = false) {

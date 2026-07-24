@@ -114,7 +114,10 @@ below the current directory. You never need to be in a special directory.
      app — the platform displays it on the app's page.
 7. **If push reports a deploy error**, read the error, fix the code, and
    push again. The previous working version keeps serving until a push
-   succeeds.
+   succeeds. If the user wants a previous version back (`appato history`
+   lists them), run `appato rollback <version>` — it restores that
+   version's files as a new version (history is append-only; nothing is
+   lost) — then `appato sync` to update the local copy.
 8. **Before ending ANY response where you touched app files, push — and
    state the deploy status explicitly**, using the values from the CLI's
    machine line (below): e.g. "Deployed to <url> (v12, sha 3f9a01c2b4d6)."
@@ -134,9 +137,16 @@ above them.
 
 - `APPATO_DEPLOYED app=<org>/<slug> version=<n> sha=<12-hex> url=<url>` —
   push succeeded; the app is live at `url`.
-- `APPATO_DEPLOY_FAILED app=<org>/<slug> version=<n> sha=<12-hex>
+- `APPATO_DEPLOY_FAILED app=<org>/<slug> version=<n> [sha=<12-hex>]
   error=<json-string>` — the code was saved but is NOT live; the previous
-  version keeps serving. Fix and push again.
+  version keeps serving. Fix and push again. (`sha` is present on push
+  failures, absent on rollback failures.)
+- `APPATO_ROLLED_BACK app=<org>/<slug> version=<n> restored=<m> url=<url>`
+  — v`m`'s files were restored as new version `n`, which is now live.
+  `restored` names the version that authored the content: rolling back to
+  a version that was itself a rollback resolves to its origin, so `m` may
+  differ from the version you passed. Local files are behind the new
+  version — run `appato sync` before any further edits.
 - `APPATO_STATUS app=<org>/<slug> deployed_version=<n|none>
   deployed_at=<ms-epoch|never> dirty=<true|false>
   state=<in_sync|behind|modified> archived=<true|false> sha=<12-hex>
