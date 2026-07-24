@@ -32,13 +32,20 @@ below the current directory. You never need to be in a special directory.
 1. **Bootstrap** — find a working `appato`, in this order:
    1. `command -v appato` (already installed)
    2. `~/.appato/bin/appato` (installed but PATH not refreshed)
-   3. Install it: `curl -fsSL https://appato.com/install.sh | sh`, then use
-      `~/.appato/bin/appato`.
-   4. If installation fails (permissions, network), use the copy bundled
+   3. Install it — the CLI is a single dependency-free Node script, so
+      installation is one download (never pipe curl to sh; permission
+      systems rightly block that):
+      `mkdir -p ~/.appato/bin && curl -fsSL https://appato.com/cli/appato.mjs -o ~/.appato/bin/appato.mjs`
+      then run it as `node ~/.appato/bin/appato.mjs` (substitute for
+      `appato` in every command below).
+   4. If the download fails (network, permissions), use the copy bundled
       with this plugin: `node "${CLAUDE_PLUGIN_ROOT}/bin/appato.mjs"`
-      (works in Claude Code and Codex; substitute it for `appato` in every
-      command below). If it reports it's too old, retry step 3 first.
+      (works in Claude Code and Codex). If it reports it's too old, retry
+      step 3 first.
 
+   If a command gets blocked by a permission prompt or classifier, don't
+   work around it with creative shell — tell the user what needs approving
+   and why (one file download to ~/.appato/bin, then running it with node).
    If any command says the user isn't logged in, run `appato login` and
    tell the user to approve it in their browser.
 2. **Orient**: run `appato status` before anything else. Outside an app it
