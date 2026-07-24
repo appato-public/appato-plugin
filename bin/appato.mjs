@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -677,6 +677,11 @@ async function history(json = false) {
     const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
     console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
+  }
+  // Server pages at 50 (nextBefore = cursor for older). Rollback accepts any
+  // version id, so older targets still work — this is a discovery hint only.
+  if (body.nextBefore) {
+    console.log(`… older versions exist — see the full history in the console`);
   }
 }
 
