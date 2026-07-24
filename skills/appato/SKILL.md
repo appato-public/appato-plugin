@@ -200,7 +200,8 @@ above them.
 ## Shared data & realtime
 
 Every app has a private, zero-setup data store and realtime hub — no
-provisioning, no credentials, no npm. Data is scoped to the app and visible
+provisioning, no credentials, no npm. (`appato sdk` prints this whole
+reference — API surface, tiers, recipes, limits — whenever you need it.) Data is scoped to the app and visible
 to all org members (it's an internal tool; there are no per-user secrets).
 
 Three tiers — picking the right one matters:

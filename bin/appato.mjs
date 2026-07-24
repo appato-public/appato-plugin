@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -45,6 +45,7 @@ try {
     case "history": await history(args.includes("--json")); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
+    case "sdk": case "howto": case "docs": sdkHelp(); break;
     case "install": await install(); break;
     case "upgrade": await install(); break;
     case "--version": case "version": console.log(VERSION); break;
@@ -79,9 +80,82 @@ usage:
                             upload the app and deploy; also syncs
                             title/description from appato.json
   appato history [--json]   list versions with their change summaries
+  appato sdk                how to build apps: platform APIs (storage,
+                            realtime, identity), conventions, recipes
   appato logs               (soon) tail the app's logs
   appato install            install/update the CLI into ~/.appato/bin
   appato upgrade            same as install (update to the latest version)`);
+}
+
+/** The app-building reference, for agents (and humans) who need the API
+ * surface without the plugin skill at hand. Mirror of the appato skill —
+ * keep the two in sync when the platform SDK changes. */
+function sdkHelp() {
+  console.log(`Building apps on appato — the platform API reference
+
+APPS
+  One directory per app; entrypoint index.ts (or .js) exports a fetch
+  handler. Plain TS/JS ES modules — NO npm deps, no package.json, no
+  bundler. Serve HTML/CSS/JS inline from the fetch handler. The platform
+  handles ALL auth — never build login. The /_appato/* URL path is
+  reserved (your handler never sees it). Every push deploys.
+
+SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
+  getUser(request)      -> { id, email, name, org } | null   (verified)
+  requireUser(request)  -> same, or throws a 401 Response
+  storage.get(key)                 -> value | undefined
+  storage.set(key, value)             values: any JSON <= 128KB
+  storage.delete(key)
+  storage.list(prefix, { limit, reverse, after }) -> [{ key, value }]
+  storage.push(prefix, value)      -> key   (server-assigned time-sortable
+                                     id: keys under a prefix sort
+                                     chronologically)
+  storage.increment(key, by = 1)   -> new value  (atomic counter)
+  storage.sql(query, params)       -> { rows, rowsRead, rowsWritten }
+  storage.sqlBatch([{ query, params }, ...]) -> one transaction
+  publish(event, data, channel = "main")     ephemeral broadcast to clients
+
+  Keys are strings; use "/"-separated prefixes as collections
+  ("messages/", "votes/"). SQL = the app's own private SQLite; table names
+  starting with _appato_ are reserved; SQL emits NO realtime events.
+
+BROWSER SDK — in your served HTML:
+  <script type="module">
+    import { appato } from "/_appato/client.js";
+    appato.user                       // { id, email, name, org } — verified
+    appato.storage                    // same verbs as the server SDK
+    appato.watch("messages/", (entries) => { ... });
+        // live query: fires with ALL entries under the prefix immediately
+        // and on every change, sorted by key. Reconnects re-sync
+        // automatically — never write polling or WebSocket code.
+    const room = appato.channel();    // default channel "main"
+    room.publish("reaction", { x: 1 });         // not echoed to sender
+    room.on("reaction", (data, from) => ...);   // from = { id, name }
+    room.presence.set({ status: "here" });      // patch-merge; auto-leave
+    room.presence.on((members) => ...);         // [{ user, data }]
+  </script>
+
+THREE TIERS — picking the right one matters
+  storage   persisted        messages, votes, rows, settings
+  presence  while tab open   who's here, typing status
+  broadcast never stored     reactions, pings, cursor moves
+  Never store presence-shaped data in storage; never expect a broadcast
+  to be replayed.
+
+RECIPES
+  chat       storage.push + appato.watch + presence
+  poll       storage.increment + appato.watch
+  tracker    storage.set/list + appato.watch
+  dashboard  appato.watch (+ server publish() for ticks)
+  cursors    channel broadcast only
+
+LIMITS (flat, per app)
+  128KB/value · ~100MB total · watch <= 500 entries/prefix (paginate with
+  list/SQL past that) · presence data <= 2KB · broadcast <= 32KB
+
+WORKFLOW
+  appato status -> sync before editing -> edit -> appato push -m "..."
+  (push output ends with a machine-readable APPATO_* line; parse that)`);
 }
 
 // ---------------------------------------------------------------------------
