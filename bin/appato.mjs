@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -60,8 +60,10 @@ usage:
   appato login              authenticate this machine (opens browser)
   appato logout             remove stored credentials
   appato whoami             show the signed-in user and orgs
-  appato status [--json]    inside an app: deploy status, URL, local drift
-                            elsewhere: list the org's apps + local checkouts
+  appato status [--json] [--all]
+                            inside an app: deploy status, URL, local drift
+                            elsewhere: list your apps + local checkouts
+                            (--all: every app in the org)
   appato create <slug> --title "..." --description "..."  [--org <slug>]
                             create an app in a new ./<slug>/ directory
   appato clone <slug> [dir] [--org <slug>]
@@ -282,15 +284,7 @@ async function clone(args) {
   if (inside) {
     throw new Error(`already inside an appato app (${inside}) — apps don't nest; cd out first`);
   }
-
-  const listRes = await apiFetch(`/api/apps${orgFlag ? `?org=${encodeURIComponent(orgFlag)}` : ""}`);
-  const listBody = await listRes.json();
-  if (!listRes.ok) throw new Error(listBody.error || `clone failed (${listRes.status})`);
-  const org = listBody.org;
-  const record = listBody.apps.find((a) => a.slug === slug);
-  if (!record) {
-    throw new Error(`no app "${slug}" in ${org} — run \`appato status\` to list available apps`);
-  }
+  const org = orgFlag ?? (await defaultOrg());
 
   const existing = scanChildApps(process.cwd()).find((c) => c.org === org && c.app === slug);
   if (existing) {
@@ -305,6 +299,9 @@ async function clone(args) {
   }
   const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
   const state = await stateRes.json();
+  if (stateRes.status === 404) {
+    throw new Error(`no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`);
+  }
   if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
 
   mkdirSync(dir, { recursive: true });
@@ -312,7 +309,7 @@ async function clone(args) {
   writeFileSync(
     join(dir, "appato.json"),
     JSON.stringify(
-      { org, app: slug, title: record.name || slug, description: record.description || "" },
+      { org, app: slug, title: state.title || slug, description: state.description || "" },
       null,
       2,
     ) + "\n",
@@ -420,9 +417,19 @@ async function history(json = false) {
   }
 }
 
+/** First org membership — the default when --org isn't given. */
+async function defaultOrg() {
+  const res = await apiFetch("/api/me");
+  if (!res.ok) throw new Error("unauthorized — run: appato login");
+  const me = await res.json();
+  const org = me.orgs[0]?.slug;
+  if (!org) throw new Error("you're not in an org yet — create one at " + DEFAULT_HOST);
+  return org;
+}
+
 async function status(json = false) {
   const root = findAppRoot();
-  if (!root) return workspaceStatus(json);
+  if (!root) return workspaceStatus(json, args.includes("--all"));
 
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}`);
@@ -477,9 +484,13 @@ async function status(json = false) {
   console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} sha=${out.localSha} url=${out.url}`);
 }
 
-/** `status` outside any app: org app list + local checkouts one level down. */
-async function workspaceStatus(json = false) {
-  const res = await apiFetch("/api/apps");
+/**
+ * `status` outside any app: the caller's own apps (orgs can be huge, so the
+ * full list is opt-in via --all) + every checkout one level down, whoever
+ * created it.
+ */
+async function workspaceStatus(json = false, all = false) {
+  const res = await apiFetch(`/api/apps${all ? "" : "?mine=1"}`);
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
   const local = scanChildApps(process.cwd());
@@ -489,14 +500,27 @@ async function workspaceStatus(json = false) {
     title: a.name,
     dir: localByApp.get(`${body.org}/${a.slug}`) ?? null,
   }));
+  // Checkouts of apps outside the fetched list (e.g. a coworker's app you
+  // cloned) still belong in the picture.
+  const listed = new Set(apps.map((a) => a.slug));
+  for (const c of local) {
+    if (c.org === body.org && !listed.has(c.app)) {
+      apps.push({ slug: c.app, title: "(created by someone else)", dir: c.dir });
+    }
+  }
+  const scope = all ? "all" : "mine";
   if (json) {
-    console.log(JSON.stringify({ org: body.org, apps }));
+    console.log(JSON.stringify({ org: body.org, scope, apps }));
     return;
   }
   if (apps.length === 0) {
-    console.log(`No apps in ${body.org} yet — start one: appato create <slug> --title "..." --description "..."`);
+    console.log(
+      all
+        ? `No apps in ${body.org} yet — start one: appato create <slug> --title "..." --description "..."`
+        : `No apps of yours in ${body.org} yet — create one, or \`appato status --all\` to see everyone's.`,
+    );
   } else {
-    console.log(`Apps in ${body.org} (● = checked out below this directory):`);
+    console.log(`${all ? "All apps" : "Your apps"} in ${body.org} (● = checked out below this directory):`);
     for (const a of apps) {
       console.log(
         a.dir
@@ -504,8 +528,9 @@ async function workspaceStatus(json = false) {
           : `  ○ ${a.slug}  ${a.title}  (appato clone ${a.slug})`,
       );
     }
+    if (!all) console.log(`(yours only — \`appato status --all\` lists the whole org)`);
   }
-  console.log(`APPATO_WORKSPACE org=${body.org} apps=${apps.length} checked_out=${apps.filter((a) => a.dir).length}`);
+  console.log(`APPATO_WORKSPACE org=${body.org} scope=${scope} apps=${apps.length} checked_out=${apps.filter((a) => a.dir).length}`);
   for (const a of apps) {
     console.log(`APPATO_APP app=${body.org}/${a.slug} dir=${a.dir ? JSON.stringify("./" + a.dir) : "none"}`);
   }

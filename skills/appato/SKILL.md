@@ -42,10 +42,11 @@ below the current directory. You never need to be in a special directory.
    If any command says the user isn't logged in, run `appato login` and
    tell the user to approve it in their browser.
 2. **Orient**: run `appato status` before anything else. Outside an app it
-   lists every app in the org and which are checked out below the current
-   directory; inside an app it reports deploy state and whether the local
-   copy is current. Use this to decide between the paths below — and to
-   avoid creating a duplicate of an app that already exists.
+   lists the user's own apps and which are checked out below the current
+   directory (`--all` lists the whole org — use it when looking for a
+   coworker's app); inside an app it reports deploy state and whether the
+   local copy is current. Use this to decide between the paths below — and
+   to avoid creating a duplicate of an app the user already has.
 3. **Existing app?** If it isn't checked out here, run
    `appato clone <slug>` (creates `./<slug>/`). If it is, **run
    `appato sync` inside it before editing** so you work on the latest
@@ -59,8 +60,10 @@ below the current directory. You never need to be in a special directory.
    distinct from existing apps. Then run:
    `appato create <slug> --title "PTO Tracker" --description "..."`.
    This creates the `./<slug>/` directory itself — cd in afterward. If the
-   slug is taken, pick a more specific one (e.g. `eng-pto-tracker`) rather
-   than a numbered suffix.
+   slug is taken, the error lists similar existing apps — pick a more
+   specific slug informed by that list (e.g. `eng-pto-tracker`), never a
+   numbered suffix. If it's unclear whether a similar app already covers
+   the need, check `appato status --all` before creating a duplicate.
    The title is the human name shown in the workspace; the description is
    1–2 sentences on what the app does and who it's for — write both for the
    user's coworkers, who will discover the app with no other context.
@@ -116,9 +119,11 @@ above them.
   deployed_at=<ms-epoch|never> dirty=<true|false>
   state=<in_sync|behind|modified> sha=<12-hex> url=<url>` — `behind` means
   run `appato sync`; `modified` means unpushed local changes — push.
-- `APPATO_WORKSPACE org=<org> apps=<n> checked_out=<n>` followed by one
-  `APPATO_APP app=<org>/<slug> dir=<"./dir"|none>` per app — printed by
-  `status` when outside any app directory.
+- `APPATO_WORKSPACE org=<org> scope=<mine|all> apps=<n> checked_out=<n>`
+  followed by one `APPATO_APP app=<org>/<slug> dir=<"./dir"|none>` per app
+  — printed by `status` when outside any app directory. `scope=mine` means
+  only the user's own apps are listed (plus local checkouts); rerun with
+  `--all` for the org-wide list.
 - `APPATO_CREATED app=<org>/<slug> dir=<json-string> url=<url>` — app
   created; its directory is `dir`.
 - `APPATO_CLONED app=<org>/<slug> version=<n> dir=<json-string> url=<url>`
