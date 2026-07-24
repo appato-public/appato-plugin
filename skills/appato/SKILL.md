@@ -8,7 +8,7 @@ allowed-tools: Bash(appato *)
 
 appato hosts small internal-only web apps for the user's company. You write
 the code locally; the `appato` CLI deploys it. Apps are live at
-`https://<app>--<org>.apps.appato.com` and are only reachable by signed-in
+`https://<org>-<app>.apps.appato.com` and are only reachable by signed-in
 members of the user's company — never build login screens; the platform
 handles auth.
 
@@ -78,7 +78,7 @@ below the current directory. You never need to be in a special directory.
    (ask the user before discarding work you didn't make).
 4. **New app**: derive a short kebab-case slug from the app's purpose (e.g.
    "PTO tracker" → `pto-tracker`); lowercase letters/digits/single hyphens
-   only (`--` is reserved). Check the `status` list first so the name is
+   only. Check the `status` list first so the name is
    distinct from existing apps. Then run:
    `appato create <slug> --title "PTO Tracker" --description "..."`.
    This creates the `./<slug>/` directory itself — cd in afterward. If the
