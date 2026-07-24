@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.3";
+const VERSION = "0.2.4";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -479,7 +479,7 @@ async function history(json = false) {
   }
   for (const v of body.versions) {
     const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
-    console.log(`${flag} v${v.id}  ${ago(v.createdAt)} ago  ${v.message || "(no message)"}`);
+    console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
   }
 }
@@ -540,7 +540,7 @@ async function status(json = false) {
   console.log(`app:      ${out.app}`);
   console.log(`url:      ${out.url}`);
   console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
-  console.log(`version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)} ago)` : ""}` : "never"}`);
+  console.log(`version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)})` : ""}` : "never"}`);
   if (!dirty) {
     console.log(`local:    in sync with pushed version`);
   } else if (syncState === "behind") {
@@ -695,12 +695,14 @@ function diffFiles(local, remote) {
   return [...paths].filter((p) => local[p] !== remote[p]).sort();
 }
 
+// Same contract as web/src/lib/time.ts ago(): the "ago" is included.
+// (Deliberately duplicated — the CLI stays a single dependency-free file.)
 function ago(msEpoch) {
   const s = Math.max(0, Math.round((Date.now() - msEpoch) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 
 function flagValue(argv, flag) {
