@@ -49,13 +49,15 @@ below the current directory. You never need to be in a special directory.
    for `Bash(appato:*)` / `Bash(~/.appato/bin/appato:*)` via /permissions
    or .claude/settings.json so every appato command is covered once.
 
-   **Logging in**: if any command says the user isn't logged in, try
-   `appato login` (it opens the browser for approval). Permission systems
-   often block agents from running auth commands — that's correct behavior,
-   not an error to work around. In that case give the user the exact
-   command to run in their own terminal:
-   `~/.appato/bin/appato login` (or `appato login` if on PATH),
-   ask them to say when they've approved it, then continue.
+   **Logging in**: if any command says the user isn't logged in, run
+   `~/.appato/bin/appato login --no-wait` — it prints an approval URL and
+   exits immediately (no long-running process to time out). Share the URL,
+   ask the user to approve in their browser, and after they confirm run any
+   appato command (start with `whoami`) — the CLI completes the pending
+   login automatically; approval order never matters. If even that is
+   blocked by the permission system, that's correct behavior, not an error
+   to work around: give the user `~/.appato/bin/appato login` to run in
+   their own terminal and continue once they confirm.
 2. **Orient**: run `appato status` before anything else. Outside an app it
    lists the user's own apps and which are checked out below the current
    directory (`--all` lists the whole org — use it when looking for a
@@ -148,6 +150,11 @@ above them.
   `changed=true`, re-read files before editing.
 - `APPATO_SYNC_BLOCKED app=<org>/<slug> latest_version=<n>
   local_sha=<12-hex>` — sync refused: local has unpushed changes.
+- `APPATO_LOGIN_PENDING url=<url> expires_at=<ms-epoch>` — printed by
+  `login --no-wait`: share `url` with the user; after they approve, any
+  appato command completes the login.
+- `APPATO_INSTALLED version=<semver> path=<json-string>` — CLI installed
+  at `path`; use it for subsequent commands.
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.

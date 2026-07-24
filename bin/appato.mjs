@@ -23,10 +23,11 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
+const PENDING_FILE = join(CRED_DIR, "pending-login.json");
 const IGNORE = new Set(["node_modules", ".git", "dist", ".appato", "appato.json"]);
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -34,7 +35,7 @@ const [, , command, ...args] = process.argv;
 
 try {
   switch (command) {
-    case "login": await login(); break;
+    case "login": await login(args); break;
     case "logout": logout(); break;
     case "whoami": await whoami(); break;
     case "create": await create(args); break;
@@ -58,7 +59,10 @@ function usage() {
   console.log(`appato ${VERSION} — build & deploy internal utility apps
 
 usage:
-  appato login              authenticate this machine (opens browser)
+  appato login [--no-wait]  authenticate this machine (opens browser).
+                            --no-wait exits immediately after printing the
+                            approval URL; the next appato command finishes
+                            the login once you've approved
   appato logout             remove stored credentials
   appato whoami             show the signed-in user and orgs
   appato status [--json] [--all]
@@ -83,68 +87,129 @@ usage:
 // ---------------------------------------------------------------------------
 // auth
 
-async function login() {
+/**
+ * Device-flow login, resumable by design: the pending device code is saved
+ * to disk the moment it's minted, so login survives the polling process
+ * dying (agent Bash timeouts, closed terminals, classifier kills). Approval
+ * order doesn't matter — any later appato command completes the exchange
+ * via credentials(). `--no-wait` prints the approval URL and exits
+ * immediately (the agent-friendly path).
+ */
+async function login(args = []) {
   const host = DEFAULT_HOST;
-  // better-auth device authorization flow
-  const codeRes = await fetch(`${host}/api/auth/device/code`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: "appato-cli" }),
-  });
-  if (!codeRes.ok) throw new Error(`device flow unavailable (${codeRes.status})`);
-  const code = await codeRes.json();
-  const verifyUrl = code.verification_uri_complete || code.verification_uri;
-  console.log(`Open to approve this device:\n  ${verifyUrl}`);
-  tryOpen(verifyUrl);
-
-  const interval = (code.interval || 5) * 1000;
-  const deadline = Date.now() + (code.expires_in || 1800) * 1000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, interval));
-    const tokenRes = await fetch(`${host}/api/auth/device/token`, {
+  let pending = readPendingLogin();
+  if (!pending || pending.host !== host) {
+    const codeRes = await fetch(`${host}/api/auth/device/code`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: code.device_code,
-        client_id: "appato-cli",
-      }),
+      body: JSON.stringify({ client_id: "appato-cli" }),
     });
-    if (tokenRes.ok) {
-      const token = await tokenRes.json();
-      // Device-flow session token, sent as Authorization: Bearer.
-      // TODO: exchange for a long-lived API key once the server supports it.
-      const cred = { host, bearer: token.access_token };
-      mkdirSync(CRED_DIR, { recursive: true });
-      writeFileSync(CRED_FILE, JSON.stringify(cred, null, 2), { mode: 0o600 });
-      console.log("Logged in.");
+    if (!codeRes.ok) throw new Error(`device flow unavailable (${codeRes.status})`);
+    const code = await codeRes.json();
+    pending = {
+      host,
+      device_code: code.device_code,
+      verify_url: code.verification_uri_complete || code.verification_uri,
+      interval: code.interval || 5,
+      expires_at: Date.now() + (code.expires_in || 1800) * 1000,
+    };
+    mkdirSync(CRED_DIR, { recursive: true });
+    writeFileSync(PENDING_FILE, JSON.stringify(pending, null, 2), { mode: 0o600 });
+  }
+  console.log(`Open to approve this device:\n  ${pending.verify_url}`);
+  tryOpen(pending.verify_url);
+
+  if (args.includes("--no-wait")) {
+    console.log(
+      "After approving in the browser, run any appato command (e.g. `appato whoami`) — it completes the login automatically.",
+    );
+    console.log(`APPATO_LOGIN_PENDING url=${pending.verify_url} expires_at=${pending.expires_at}`);
+    return;
+  }
+
+  while (Date.now() < pending.expires_at) {
+    await new Promise((r) => setTimeout(r, pending.interval * 1000));
+    if (await exchangePendingLogin(pending)) {
       await whoami();
       return;
     }
-    const body = await tokenRes.json().catch(() => ({}));
-    if (body.error && body.error !== "authorization_pending" && body.error !== "slow_down") {
-      throw new Error(`login failed: ${body.error}`);
-    }
   }
-  throw new Error("login timed out");
+  rmPendingLogin();
+  throw new Error("login timed out — run appato login again");
+}
+
+/** One token-exchange attempt. True = logged in; false = still pending. */
+async function exchangePendingLogin(pending) {
+  const res = await fetch(`${pending.host}/api/auth/device/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: pending.device_code,
+      client_id: "appato-cli",
+    }),
+  });
+  if (res.ok) {
+    const token = await res.json();
+    // Device-flow session token, sent as Authorization: Bearer.
+    // TODO: exchange for a long-lived API key once the server supports it.
+    const cred = { host: pending.host, bearer: token.access_token };
+    mkdirSync(CRED_DIR, { recursive: true });
+    writeFileSync(CRED_FILE, JSON.stringify(cred, null, 2), { mode: 0o600 });
+    rmPendingLogin();
+    console.log("Logged in.");
+    return true;
+  }
+  const body = await res.json().catch(() => ({}));
+  if (body.error === "authorization_pending" || body.error === "slow_down") return false;
+  rmPendingLogin();
+  throw new Error(`login failed: ${body.error || res.status}`);
+}
+
+function readPendingLogin() {
+  try {
+    const p = JSON.parse(readFileSync(PENDING_FILE, "utf8"));
+    if (p.device_code && p.expires_at > Date.now()) return p;
+  } catch {
+    // no pending login
+  }
+  return null;
+}
+
+function rmPendingLogin() {
+  try {
+    unlinkSync(PENDING_FILE);
+  } catch {
+    // already gone
+  }
 }
 
 function logout() {
   writeFileSync(CRED_FILE, "{}");
+  rmPendingLogin();
   console.log("Logged out.");
 }
 
-function credentials() {
-  if (!existsSync(CRED_FILE)) {
-    throw new Error("not logged in — run: appato login");
+/** Stored credentials — or, when absent, finish a pending device login. */
+async function credentials() {
+  if (existsSync(CRED_FILE)) {
+    const cred = JSON.parse(readFileSync(CRED_FILE, "utf8"));
+    if (cred.bearer) return cred;
   }
-  const cred = JSON.parse(readFileSync(CRED_FILE, "utf8"));
-  if (!cred.bearer) throw new Error("not logged in — run: appato login");
-  return cred;
+  const pending = readPendingLogin();
+  if (pending) {
+    if (await exchangePendingLogin(pending)) {
+      return JSON.parse(readFileSync(CRED_FILE, "utf8"));
+    }
+    throw new Error(
+      `login pending approval — approve at ${pending.verify_url} then retry this command`,
+    );
+  }
+  throw new Error("not logged in — run: appato login");
 }
 
 async function apiFetch(path, options = {}) {
-  const cred = credentials();
+  const cred = await credentials();
   const headers = { "Content-Type": "application/json", ...options.headers };
   headers["Authorization"] = `Bearer ${cred.bearer}`;
   const res = await fetch(`${cred.host}${path}`, { ...options, headers });
