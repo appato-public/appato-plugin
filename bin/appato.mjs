@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.4";
+const VERSION = "0.2.5";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -539,7 +539,11 @@ async function status(json = false) {
   }
   console.log(`app:      ${out.app}`);
   console.log(`url:      ${out.url}`);
-  console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
+  if (body.archived) {
+    console.log(`status:   archived — not serving; the app's owner can make it live again in the console`);
+  } else {
+    console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
+  }
   console.log(`version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)})` : ""}` : "never"}`);
   if (!dirty) {
     console.log(`local:    in sync with pushed version`);
@@ -548,7 +552,7 @@ async function status(json = false) {
   } else {
     console.log(`local:    ⚠ ${changedFiles.length} file(s) with unpushed changes — run: appato push`);
   }
-  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} sha=${out.localSha} url=${out.url}`);
+  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} archived=${body.archived ?? false} sha=${out.localSha} url=${out.url}`);
 }
 
 /**
@@ -564,7 +568,7 @@ async function workspaceStatus(json = false, all = false) {
   const localByApp = new Map(local.map((c) => [`${c.org}/${c.app}`, c.dir]));
   const apps = body.apps.map((a) => ({
     slug: a.slug,
-    title: a.name,
+    title: a.name + (a.status === "archived" ? "  [archived]" : ""),
     dir: localByApp.get(`${body.org}/${a.slug}`) ?? null,
   }));
   // Checkouts of apps outside the fetched list (e.g. a coworker's app you

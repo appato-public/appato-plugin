@@ -139,8 +139,12 @@ above them.
   version keeps serving. Fix and push again.
 - `APPATO_STATUS app=<org>/<slug> deployed_version=<n|none>
   deployed_at=<ms-epoch|never> dirty=<true|false>
-  state=<in_sync|behind|modified> sha=<12-hex> url=<url>` — `behind` means
-  run `appato sync`; `modified` means unpushed local changes — push.
+  state=<in_sync|behind|modified> archived=<true|false> sha=<12-hex>
+  url=<url>` — `behind` means run `appato sync`; `modified` means unpushed
+  local changes — push. `archived=true` means the app is offline by its
+  owner's choice: pushes are refused; don't try to work around it — tell
+  the user its owner can make it live again from the app's page in the
+  console.
 - `APPATO_WORKSPACE org=<org> scope=<mine|all> apps=<n> checked_out=<n>`
   followed by one `APPATO_APP app=<org>/<slug> dir=<"./dir"|none>` per app
   — printed by `status` when outside any app directory. `scope=mine` means
