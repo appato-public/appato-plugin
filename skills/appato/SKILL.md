@@ -190,11 +190,94 @@ above them.
   handler (template strings are fine and normal here).
 - `./_appato.js` is injected by the platform at deploy time — import it, but
   never create that file.
-- For state, keep v1 apps stateless or store data client-side; platform
-  storage APIs are coming. Do not call external databases unless the user
-  provides one.
+- For state, use the built-in storage + realtime APIs (next section). Do not
+  call external databases unless the user provides one.
+- The `/_appato/*` URL path is reserved by the platform — your fetch handler
+  never sees it; don't route on it.
 - Keep apps small and single-purpose. Prefer one screen that does the job
   over navigation and settings pages.
+
+## Shared data & realtime
+
+Every app has a private, zero-setup data store and realtime hub — no
+provisioning, no credentials, no npm. Data is scoped to the app and visible
+to all org members (it's an internal tool; there are no per-user secrets).
+
+Three tiers — picking the right one matters:
+
+- **storage** (persisted): messages, votes, tracker rows, settings.
+- **presence** (lives while a tab is open): who's here, typing, cursors' owners.
+- **broadcast** (fire-and-forget, never stored): reactions, pings, cursor moves.
+
+Never store presence-shaped data (cursor positions, "is typing") in storage,
+and never expect a broadcast to be replayed — if it must survive a reload,
+it belongs in storage.
+
+**Server side** (in your fetch handler), from `./_appato.js`:
+
+```ts
+import { storage, publish } from "./_appato.js";
+
+await storage.set("polls/lunch", { question: "Where?", options: ["a", "b"] });
+const poll = await storage.get("polls/lunch");        // undefined if missing
+const key = await storage.push("messages/", { text }); // appends with a
+    // server-assigned time-sortable id → keys sort chronologically
+const n = await storage.increment("votes/pizza");      // atomic counter
+const msgs = await storage.list("messages/", { limit: 50, reverse: true });
+await storage.delete("polls/old");
+await publish("refresh", { reason: "new data" });      // ephemeral broadcast
+```
+
+Keys are plain strings; use `/`-separated prefixes as collections
+(`messages/`, `votes/`). Values are JSON (≤128KB each; ~100MB per app).
+
+**SQL** for structured data (reports, joins, aggregates) — the app's own
+private SQLite:
+
+```ts
+await storage.sql("CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY, who TEXT, amount REAL)");
+await storage.sql("INSERT INTO expenses (who, amount) VALUES (?, ?)", [user.name, 12.5]);
+const { rows } = await storage.sql("SELECT who, SUM(amount) AS total FROM expenses GROUP BY who");
+await storage.sqlBatch([{ query: "...", params: [] }, { query: "..." }]); // one transaction
+```
+
+Table names prefixed `_appato_` are reserved. Rule of thumb: KV + `watch`
+for anything live on screen; SQL when you need queries/joins (SQL tables do
+NOT emit realtime change events).
+
+**Browser side** — in the HTML your app serves, import the client SDK (it
+knows the signed-in user; never build login or ask who the user is):
+
+```html
+<script type="module">
+  import { appato } from "/_appato/client.js";
+
+  appato.user;                            // { id, email, name, org } — verified
+  appato.storage;                         // same verbs as the server SDK
+
+  // Live view: cb fires with all entries under the prefix, immediately and
+  // on every change (snapshot semantics — reconnects re-sync automatically).
+  appato.watch("messages/", (entries) => {
+    // entries: [{ key, value }] sorted by key (push keys = chronological)
+    render(entries.map((e) => e.value));
+  });
+
+  const room = appato.channel();          // default channel "main"
+  room.publish("reaction", { emoji: "🔥" });   // not echoed to sender
+  room.on("reaction", (data, from) => showBurst(data.emoji, from.name));
+  room.presence.set({ status: "viewing" });    // patch-merge; auto-leave on close
+  room.presence.on((members) => renderRoster(members)); // [{ user, data }]
+</script>
+```
+
+Recipes: **chat** = `storage.push` + `appato.watch` + presence · **poll /
+tracker** = `increment`/`set` + `watch` · **dashboard** = `watch` (+ server
+`publish` for ticks) · **cursors / typing** = `channel` broadcast only.
+
+`watch` is for prefixes with ≤500 entries (it delivers a full snapshot);
+paginate bigger data with `storage.list`/SQL. Writes from any tab, the
+server, or a coworker's browser all fan out to every watcher — you never
+need polling, WebSocket code, or reconnect handling.
 
 ## Answering "where is my app?"
 
