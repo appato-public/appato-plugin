@@ -196,6 +196,15 @@ above them.
   never sees it; don't route on it.
 - Keep apps small and single-purpose. Prefer one screen that does the job
   over navigation and settings pages.
+- **Every app has a generated square icon** — the platform creates it at
+  app creation and the owner can change it in the console. Use it wherever
+  the app wants a logo or square mark (header, empty states, about):
+  `<img src="/_appato/icon.png?size=64">` — sizes 16, 32, 48, 64, 128, 180,
+  192, 256 (omit `?size` for 256). It's a transparent-background PNG, so it
+  sits on any surface. Never generate or hand-draw your own logo assets.
+  Favicon, apple-touch-icon, and a PWA web manifest are automatic (the
+  platform injects them at serve time when the app doesn't define its own)
+  — don't add those tags yourself unless the user wants custom ones.
 
 ## Shared data & realtime
 
