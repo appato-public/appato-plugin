@@ -1,0 +1,12 @@
+{
+  "name": "appato",
+  "owner": { "name": "appato" },
+  "plugins": [
+    {
+      "name": "appato",
+      "description": "Build and deploy internal utility apps on appato from any coding agent",
+      "source": "./",
+      "strict": true
+    }
+  ]
+}
