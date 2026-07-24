@@ -94,6 +94,9 @@ below the current directory. You never need to be in a special directory.
    - `title` and `description` are yours to maintain: when the app's
      purpose or scope changes, update them in `appato.json` like any other
      file. Every push syncs them to the platform.
+   - `crons` (optional) declares the app's schedules — see "Scheduled jobs"
+     below. Every push syncs the whole array, so removing an entry removes
+     the schedule.
 5. **Write code** (conventions below), then push and share the printed URL
    with the user.
 6. **Push frequently, always with a change summary.** Run
@@ -174,6 +177,15 @@ above them.
   appato command completes the login.
 - `APPATO_INSTALLED version=<semver> path=<json-string>` — CLI installed
   at `path`; use it for subsequent commands.
+- `APPATO_CRONS app=<org>/<slug> count=<n> suspended=<true|false>` followed
+  by one `APPATO_CRON name=<name> schedule=<json-string> tz=<zone>
+  paused=<true|false> paused_by=<user|auto|none> next_at=<ms-epoch|none>
+  failures=<n> last_status=<ok|error|timeout|skipped|never>` per schedule.
+  `paused_by=auto` means the platform stopped it after repeated failures —
+  fix the handler, push, then `appato cron resume <name>`.
+- `APPATO_CRON_RUN app=<org>/<slug> name=<name> status=<ok|error|timeout>
+  http=<code|none> duration_ms=<n> error=<json-string>` — result of
+  `appato cron run`. Non-`ok` exits 2.
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.
@@ -288,6 +300,77 @@ tracker** = `increment`/`set` + `watch` · **dashboard** = `watch` (+ server
 paginate bigger data with `storage.list`/SQL. Writes from any tab, the
 server, or a coworker's browser all fan out to every watcher — you never
 need polling, WebSocket code, or reconnect handling.
+
+## Scheduled jobs (reminders, digests, nightly reports)
+
+When the user wants something to happen on a schedule — "remind the team
+every Friday", "email me a nightly summary", "check X every hour" — declare
+it in `appato.json` and handle it in your fetch handler. Never write your
+own timer, and never ask the user to trigger it manually.
+
+```json
+{
+  "org": "acme", "app": "standup-bot",
+  "title": "Standup Bot", "description": "...",
+  "crons": [
+    { "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }
+  ]
+}
+```
+
+- `name` — kebab-case; it's the handler path and the label the user sees.
+- `schedule` — standard 5-field cron (`minute hour day-of-month month
+  day-of-week`).
+- **`tz` — set this whenever the user names a wall-clock time.** It's an
+  IANA zone (`America/Chicago`, `Europe/London`). Omitting it means UTC,
+  which silently drifts an hour across daylight saving and fires at the
+  wrong local time for half the year. Use the user's own timezone; ask if
+  you don't know it. Never convert a local time to UTC yourself.
+- `path` (optional) — defaults to `/cron/<name>`.
+
+The platform POSTs that path at each fire. Guard it with `requireCron` so
+only real scheduled invocations run the job:
+
+```ts
+import { requireCron, storage } from "./_appato.js";
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/cron/friday-reminder") {
+      requireCron(request);          // 404s ordinary visitors
+      await storage.push("reminders/", { at: Date.now() });
+      return new Response("ok");     // non-2xx = a failed run
+    }
+    ...
+  },
+};
+```
+
+**Test it immediately — don't wait for Friday.** After pushing, run
+`appato cron run friday-reminder`: it fires the job now and prints the
+result. Then `appato cron` shows every schedule, its next run, and the last
+outcome. Do this before telling the user the schedule works.
+
+Behavior worth knowing (don't rebuild any of it):
+
+- A run that returns non-2xx, errors, or takes over 5 minutes is a failure;
+  the console shows it. **10 consecutive failures auto-pause the schedule**
+  — fix the handler, push, then `appato cron resume <name>`.
+- Runs never overlap: if one is still going when the next fire is due, that
+  fire is skipped.
+- Missed fires (platform downtime, archived app) are skipped, never
+  replayed in a burst.
+- Pausing/resuming lives in the console and CLI, not the manifest — a push
+  won't un-pause something a person deliberately paused.
+- Schedules are part of the version, so restoring an old version restores
+  the schedules that shipped with it. `appato sync` and `appato clone`
+  refresh `appato.json`'s `crons` for you — don't hand-edit them to match
+  the server, and don't remove entries you didn't mean to delete.
+- The handler can tell a real fire from a test: `getCron(request).trigger`
+  is `"schedule"` or `"manual"`.
+- Plans cap how many schedules an app may have and how often they may run;
+  a push that exceeds it fails with the limit in the error.
 
 ## Answering "where is my app?"
 

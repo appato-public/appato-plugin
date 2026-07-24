@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.2.7";
+const VERSION = "0.3.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -43,6 +43,7 @@ try {
     case "push": await push(args); break;
     case "sync": await sync(args); break;
     case "history": await history(args.includes("--json")); break;
+    case "cron": case "crons": await cron(args); break;
     case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
@@ -81,6 +82,11 @@ usage:
                             upload the app and deploy; also syncs
                             title/description from appato.json
   appato history [--json]   list versions with their change summaries
+  appato cron [--json]      list the app's schedules, next runs, last results
+  appato cron run <name>    run a schedule now (test it without waiting)
+  appato cron pause|resume <name>
+                            stop/restart a schedule (schedules themselves are
+                            declared in appato.json)
   appato rollback <version> restore a previous version's files as a new
                             version and deploy it (nothing is lost —
                             history is append-only; see appato history)
@@ -107,6 +113,8 @@ APPS
 SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
   getUser(request)      -> { id, email, name, org } | null   (verified)
   requireUser(request)  -> same, or throws a 401 Response
+  getCron(request)      -> { name, scheduledAt, trigger } | null
+  requireCron(request)  -> same, or throws a 404 Response
   storage.get(key)                 -> value | undefined
   storage.set(key, value)             values: any JSON <= 128KB
   storage.delete(key)
@@ -153,9 +161,30 @@ RECIPES
   dashboard  appato.watch (+ server publish() for ticks)
   cursors    channel broadcast only
 
+SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
+  "crons": [
+    { "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }
+  ]
+  The platform POSTs /cron/<name> at each fire (override with "path").
+  ALWAYS set "tz" (IANA) when the user says a wall-clock time — without it
+  the schedule is UTC and drifts an hour across daylight saving.
+
+  import { requireCron, storage } from "./_appato.js";
+  if (url.pathname === "/cron/friday-reminder") {
+    requireCron(request);   // 404s anything that isn't a real scheduled fire
+    ...do the work...
+    return new Response("ok");
+  }
+
+  Non-2xx (or no response in 5 min) = a failed run; 10 consecutive failures
+  auto-pause the schedule. Runs never overlap (a late run skips the next
+  fire) and missed fires are skipped, never backfilled.
+  Test without waiting: appato cron run <name> · appato cron (list/status)
+
 LIMITS (flat, per app)
   128KB/value · ~100MB total · watch <= 500 entries/prefix (paginate with
   list/SQL past that) · presence data <= 2KB · broadcast <= 32KB
+  schedules: plan-dependent (typically 10/app, min 1 min apart)
 
 WORKFLOW
   appato status -> sync before editing -> edit -> appato push -m "..."
@@ -321,6 +350,41 @@ function semverLt(a, b) {
 // ---------------------------------------------------------------------------
 // anchoring
 
+/**
+ * The app's schedules, as manifest entries. Schedules are replace-all on
+ * push, so any local copy MUST carry them or the next push deletes them —
+ * which is why anything but a 404 (server predates schedules) aborts the
+ * caller rather than quietly returning an empty set. `verb` names the
+ * operation in that error.
+ */
+async function fetchCrons(org, app, verb) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/crons`);
+  if (res.ok) {
+    return (await res.json()).crons.map((c) => ({
+      name: c.name,
+      schedule: c.schedule,
+      ...(c.tz ? { tz: c.tz } : {}),
+      ...(c.path ? { path: c.path } : {}),
+    }));
+  }
+  if (res.status === 404) return [];
+  throw new Error(
+    `couldn't read ${org}/${app}'s schedules (${res.status}) — stopping instead of ${verb} with an incomplete appato.json, which the next push would treat as "delete every schedule". Retry in a moment.`,
+  );
+}
+
+/** Rewrite appato.json's `crons` in place -> true if it changed. */
+function writeManifestCrons(root, crons) {
+  const path = join(root, "appato.json");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  const before = JSON.stringify(manifest.crons ?? []);
+  if (crons.length === 0) delete manifest.crons;
+  else manifest.crons = crons;
+  if (JSON.stringify(manifest.crons ?? []) === before) return false;
+  writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
+  return true;
+}
+
 /** Nearest ancestor directory (including cwd) containing appato.json. */
 function findAppRoot(from = process.cwd()) {
   let dir = from;
@@ -449,12 +513,20 @@ async function clone(args) {
   }
   if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
 
+  const crons = await fetchCrons(org, slug, "cloning");
+
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, state.files ?? {});
   writeFileSync(
     join(dir, "appato.json"),
     JSON.stringify(
-      { org, app: slug, title: state.title || slug, description: state.description || "" },
+      {
+        org,
+        app: slug,
+        title: state.title || slug,
+        description: state.description || "",
+        ...(crons.length ? { crons } : {}),
+      },
       null,
       2,
     ) + "\n",
@@ -473,7 +545,7 @@ async function clone(args) {
 // driving agents (see SKILL.md): space-separated key=value pairs, values
 // JSON-encoded when they may contain spaces. Don't reword these lines.
 async function push(args = []) {
-  const { org, app, title, description, root } = appConfig();
+  const { org, app, title, description, crons, root } = appConfig();
   const message = flagValue(args, "-m") ?? flagValue(args, "--message");
   const details = flagValue(args, "--details") ?? "";
   if (!message) {
@@ -486,9 +558,20 @@ async function push(args = []) {
   const sha = filesSha(files);
   const res = await apiFetch(`/api/apps/${org}/${app}/push`, {
     method: "POST",
-    // title/description come from appato.json — the manifest is the source
-    // of truth for app metadata, synced on every push.
-    body: JSON.stringify({ files, message, details, title, description }),
+    // title/description/crons come from appato.json — the manifest is the
+    // source of truth for app metadata AND schedules, synced on every push
+    // (crons replace-all: omitting one removes it). Only a MISSING key
+    // means "no schedules"; anything else is forwarded as-is so the server
+    // rejects it — coercing here would turn a typo (`"crons": {…}`) into a
+    // silent delete of every job.
+    body: JSON.stringify({
+      files,
+      message,
+      details,
+      title,
+      description,
+      crons: crons === undefined ? [] : crons,
+    }),
   });
   const body = await res.json();
   if (res.status === 422) {
@@ -508,6 +591,12 @@ async function sync(args = []) {
   const res = await apiFetch(`/api/apps/${org}/${app}`);
   const state = await res.json();
   if (!res.ok) throw new Error(state.error || `sync failed (${res.status})`);
+  // Schedules live in appato.json, which is excluded from the file hashes —
+  // so without this a sync could report "up to date" while the manifest
+  // held stale schedules, and the next push would restore them over the
+  // real ones. Refresh them first, whatever the file comparison decides.
+  const cronsChanged = writeManifestCrons(root, await fetchCrons(org, app, "syncing"));
+  if (cronsChanged) console.log("✓ schedules updated in appato.json");
   const remote = state.files ?? {};
   const local = collectFiles(root);
   const localSha = filesSha(local);
@@ -588,6 +677,74 @@ async function history(json = false) {
     const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
     console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
+  }
+}
+
+/**
+ * Schedules (docs/CRON.md). `cron` lists them; `run` fires one immediately
+ * so a Friday job can be tested on a Tuesday; pause/resume are runtime
+ * state. The schedules themselves live in appato.json — this command never
+ * edits them (code is the source of truth; the platform only operates it).
+ */
+async function cron(args = []) {
+  const { org, app } = appConfig();
+  const [sub, name] = args.filter((a) => !a.startsWith("-"));
+
+  if (sub && sub !== "list") {
+    if (!["run", "pause", "resume"].includes(sub)) {
+      throw new Error(`unknown cron command "${sub}" — use: list | run <name> | pause <name> | resume <name>`);
+    }
+    if (!name) throw new Error(`usage: appato cron ${sub} <name>`);
+    const res = await apiFetch(`/api/apps/${org}/${app}/crons/${name}/${sub}`, { method: "POST" });
+    const body = await res.json();
+    if (res.status === 404) throw new Error(body.error || `no cron "${name}" in appato.json`);
+    if (sub === "run") {
+      const ok = res.ok && body.status === "ok";
+      const detail = body.error ? ` — ${body.error}` : "";
+      console.log(`${ok ? "✓" : "✗"} ran "${name}" (${body.status}, ${body.durationMs}ms)${detail}`);
+      console.log(
+        `APPATO_CRON_RUN app=${org}/${app} name=${name} status=${body.status} http=${body.httpStatus ?? "none"} duration_ms=${body.durationMs ?? 0} error=${JSON.stringify(body.error ?? "")}`,
+      );
+      if (!ok) process.exit(2);
+      return;
+    }
+    if (!res.ok) throw new Error(body.error || `cron ${sub} failed (${res.status})`);
+    console.log(`✓ ${sub}d "${name}"`);
+    console.log(`APPATO_CRON_${sub.toUpperCase()}D app=${org}/${app} name=${name}`);
+    return;
+  }
+
+  const res = await apiFetch(`/api/apps/${org}/${app}/crons`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `cron list failed (${res.status})`);
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  if (body.crons.length === 0) {
+    console.log(`No schedules. Add a "crons" array to appato.json and push:`);
+    console.log(`  "crons": [{ "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }]`);
+    console.log(`Your app handles POST /cron/<name> (see: appato sdk).`);
+  } else {
+    if (body.suspended) console.log(`⚠ app is archived — no schedule runs until it's live again`);
+    for (const c of body.crons) {
+      const when = c.paused
+        ? c.pausedBy === "auto"
+          ? `PAUSED after ${c.consecutiveFailures} failures`
+          : "paused"
+        : c.nextAt
+          ? `next ${until(c.nextAt)}`
+          : "not scheduled";
+      const last = c.lastRun ? `  last ${c.lastRun.status} ${ago(c.lastRun.startedAt)}` : "";
+      console.log(`${c.paused ? "⏸" : "●"} ${c.name}  ${c.schedule}${c.tz ? ` ${c.tz}` : " UTC"}  ${when}${last}`);
+      if (c.lastRun?.error) console.log(`     ${c.lastRun.error}`);
+    }
+  }
+  console.log(`APPATO_CRONS app=${org}/${app} count=${body.crons.length} suspended=${body.suspended}`);
+  for (const c of body.crons) {
+    console.log(
+      `APPATO_CRON name=${c.name} schedule=${JSON.stringify(c.schedule)} tz=${c.tz ?? "UTC"} paused=${c.paused} paused_by=${c.pausedBy ?? "none"} next_at=${c.nextAt ?? "none"} failures=${c.consecutiveFailures} last_status=${c.lastRun?.status ?? "never"}`,
+    );
   }
 }
 
@@ -814,6 +971,16 @@ function ago(msEpoch) {
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
+}
+
+// Same contract as web/src/lib/time.ts until(): the "in" is included.
+// (Deliberately duplicated — see the note on ago().)
+function until(msEpoch) {
+  const s = Math.max(0, Math.round((msEpoch - Date.now()) / 1000));
+  if (s < 60) return `in ${s}s`;
+  if (s < 3600) return `in ${Math.round(s / 60)}m`;
+  if (s < 86400) return `in ${Math.round(s / 3600)}h`;
+  return `in ${Math.round(s / 86400)}d`;
 }
 
 function flagValue(argv, flag) {
