@@ -23,14 +23,14 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.3.3";
+const VERSION = "0.3.4";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
 const PENDING_FILE = join(CRED_DIR, "pending-login.json");
-// Never uploaded: appato.json is metadata, and _appato.d.ts is local editor
-// tooling regenerated from the server (the real _appato.js is injected at
-// deploy — an app must never ship either file).
+// Never uploaded: appato.json is metadata, and _appato.d.ts is a leftover the
+// CLI used to write and no longer does — existing checkouts still have one,
+// and an app must never ship it (the real _appato.js is injected at deploy).
 const IGNORE = new Set([
   "node_modules",
   ".git",
@@ -168,9 +168,6 @@ SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
   "by" on an entry is the platform-verified writer ({ id, name }, or null
   when the app's server wrote it). Never keep your own "author" field: a
   browser can put any name in a value, but it cannot forge "by".
-
-  _appato.d.ts is written next to your code — the full typed surface, so a
-  wrong scope or a mistyped verb is an error before you deploy.
 
 BROWSER SDK — in your served HTML:
   <script type="module">
@@ -369,30 +366,6 @@ async function apiFetch(path, options = {}) {
   return res;
 }
 
-/**
- * Write `_appato.d.ts` beside the app's source. Types are the only signal
- * that catches a wrong scope (`storage.internal` from the browser, a typo'd
- * verb) BEFORE the code runs — and the file doubles as in-context reference
- * while the app is being written. Fetched rather than embedded so this CLI
- * carries no second copy of the SDK contract (src/sdk.ts owns it).
- *
- * Best-effort by design: never fail a command over editor tooling.
- */
-async function writeSdkTypes(root) {
-  try {
-    const cred = await credentials().catch(() => null);
-    const host = cred?.host ?? DEFAULT_HOST;
-    const res = await fetch(`${host}/api/sdk-types`);
-    if (!res.ok) return false;
-    const text = await res.text();
-    if (!text.includes("export declare const storage")) return false;
-    writeFileSync(join(root, "_appato.d.ts"), text);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function checkCliVersion(res) {
   const min = res.headers.get("x-appato-cli-min");
   const latest = res.headers.get("x-appato-cli-latest");
@@ -543,7 +516,6 @@ async function create(args) {
     join(dir, "appato.json"),
     JSON.stringify({ org: body.org, app: body.slug, title, description }, null, 2) + "\n",
   );
-  await writeSdkTypes(dir);
   const rel = relative(process.cwd(), dir) || ".";
   console.log(`Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`);
   console.log(`URL (after first push): ${body.url}`);
@@ -587,7 +559,6 @@ async function clone(args) {
 
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, state.files ?? {});
-  await writeSdkTypes(dir);
   writeFileSync(
     join(dir, "appato.json"),
     JSON.stringify(
@@ -626,10 +597,6 @@ async function push(args = []) {
   }
   const files = collectFiles(root);
   if (Object.keys(files).length === 0) throw new Error("no files to push");
-  // Refresh types on every push so they track the deployed SDK (and appear
-  // for apps created before this existed). Collected first, so the file is
-  // never itself uploaded even on the run that creates it.
-  await writeSdkTypes(root);
   const sha = filesSha(files);
   const res = await apiFetch(`/api/apps/${org}/${app}/push`, {
     method: "POST",

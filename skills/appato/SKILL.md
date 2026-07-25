@@ -251,8 +251,9 @@ Choosing is one question: **whose data is this?** If it's the team's,
 `shared`. If it's one person's, `mine`. If your server computes it, ask
 whether the browser should see it — `readonly` if yes, `internal` if no.
 
-`_appato.d.ts` sits next to your code with the full typed surface; a wrong
-scope or a mistyped verb is a type error before you ever deploy.
+Nothing typechecks an app for you, so this table and `appato sdk` are the
+contract — a scope or verb that isn't in them doesn't exist, and calling one
+throws when that line runs.
 
 Three tiers — picking the right one matters:
 
