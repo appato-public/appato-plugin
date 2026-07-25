@@ -289,6 +289,12 @@ knows the signed-in user; never build login or ask who the user is):
   room.on("reaction", (data, from) => showBurst(data.emoji, from.name));
   room.presence.set({ status: "viewing" });    // patch-merge; auto-leave on close
   room.presence.on((members) => renderRoster(members)); // [{ user, data }]
+
+  // Optional. After a push or rollback, open tabs reload themselves as soon
+  // as the new version is confirmed live for that user (skipped, with a
+  // "reload" pill, if they have typed something). Register a handler only to
+  // own that moment yourself.
+  appato.onDeploy((version) => saveDraft().then(() => location.reload()));
 </script>
 ```
 
@@ -299,7 +305,7 @@ tracker** = `increment`/`set` + `watch` · **dashboard** = `watch` (+ server
 `watch` is for prefixes with ≤500 entries (it delivers a full snapshot);
 paginate bigger data with `storage.list`/SQL. Writes from any tab, the
 server, or a coworker's browser all fan out to every watcher — you never
-need polling, WebSocket code, or reconnect handling.
+need polling, WebSocket code, reconnect handling, or a version check.
 
 ## Scheduled jobs (reminders, digests, nightly reports)
 
