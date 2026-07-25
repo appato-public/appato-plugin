@@ -1052,7 +1052,7 @@ function writeFiles(root, files) {
 function filesSha(files) {
   const h = createHash("sha256");
   for (const path of Object.keys(files).sort()) {
-    h.update(path).update("\0").update(files[path]).update("\0");
+    h.update(path).update("\0").update(files[path] ?? "").update("\0");
   }
   return h.digest("hex").slice(0, 12);
 }

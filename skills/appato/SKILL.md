@@ -194,6 +194,10 @@ above them.
   response body, capped) — check it to confirm the job did the right thing,
   not merely that it answered 2xx. Empty for failures, whose body is folded
   into `error` instead.
+- `APPATO_CRON_PAUSED app=<org>/<slug> name=<name>` /
+  `APPATO_CRON_RESUMED app=<org>/<slug> name=<name>` — result of `appato
+  cron pause|resume <name>`. Pausing is runtime state that survives
+  pushes: a later deploy will NOT silently resume a paused schedule.
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.
