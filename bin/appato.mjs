@@ -23,12 +23,22 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
 const PENDING_FILE = join(CRED_DIR, "pending-login.json");
-const IGNORE = new Set(["node_modules", ".git", "dist", ".appato", "appato.json"]);
+// Never uploaded: appato.json is metadata, and _appato.d.ts is local editor
+// tooling regenerated from the server (the real _appato.js is injected at
+// deploy — an app must never ship either file).
+const IGNORE = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  ".appato",
+  "appato.json",
+  "_appato.d.ts",
+]);
 const MAX_FILE_BYTES = 512 * 1024;
 
 const [, , command, ...args] = process.argv;
@@ -117,31 +127,63 @@ SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
   requireUser(request)  -> same, or throws a 401 Response
   getCron(request)      -> { name, scheduledAt, trigger } | null
   requireCron(request)  -> same, or throws a 404 Response
-  storage.get(key)                 -> value | undefined
-  storage.set(key, value)             values: any JSON <= 128KB
-  storage.delete(key)
-  storage.list(prefix, { limit, reverse, after }) -> [{ key, value }]
-  storage.push(prefix, value)      -> key   (server-assigned time-sortable
-                                     id: keys under a prefix sort
-                                     chronologically)
-  storage.increment(key, by = 1)   -> new value  (atomic counter)
-  storage.sql(query, params)       -> { rows, rowsRead, rowsWritten }
-  storage.sqlBatch([{ query, params }, ...]) -> one transaction
-  publish(event, data, channel = "main")     ephemeral broadcast to clients
+  EVERY read and write names a SCOPE — there is no unscoped store. The
+  platform enforces it with the identity it verified, so you never write an
+  auth check and no key can reach another scope.
+
+    storage.shared     every org member reads + writes   <- the default
+    storage.mine       (BROWSER ONLY) just that person, both directions
+    storage.readonly   your server writes; browsers only read
+    storage.internal   (SERVER ONLY) browsers cannot read, write, or see it
+    storage.forUser(id)  (SERVER ONLY) one person's "mine" data
+
+  Pick with one question: whose data is this? The team's -> shared. One
+  human's -> mine. Computed by your server -> readonly if the browser should
+  see it, internal if not.
+
+  Each scope has the same verbs (keys are relative to the scope):
+    .get(key)                 -> value | undefined
+    .set(key, value)             values: any JSON <= 128KB
+    .delete(key)
+    .list(prefix, { limit, reverse, after }) -> [{ key, value, by, at }]
+    .push(prefix, value)      -> key  (server-assigned time-sortable id:
+                                 keys under a prefix sort chronologically)
+    .increment(key, by = 1)   -> new value  (atomic counter)
+    .watch(prefix, cb)        (BROWSER ONLY — see below)
+  A scope omits the verbs it forbids: browser "readonly" has no set/delete/
+  push/increment, so a forbidden call fails at once instead of round-tripping.
+
+  Not scoped, server-only:
+    storage.sql(query, params)       -> { rows, rowsRead, rowsWritten }
+    storage.sqlBatch([{ query, params }, ...]) -> one transaction
+    publish(event, data, channel = "main")   ephemeral broadcast to clients
 
   Keys are strings; use "/"-separated prefixes as collections
-  ("messages/", "votes/"). SQL = the app's own private SQLite; table names
-  starting with _appato_ are reserved; SQL emits NO realtime events.
+  ("messages/", "votes/"). Nothing is reserved — the same key in two scopes
+  is two different values. SQL = the app's own private SQLite; table names
+  starting with _appato_ are reserved; SQL emits NO realtime events and has
+  no browser equivalent — use it only for what KV can't do: aggregates,
+  joins, sorting by value, more than ~500 rows.
+
+  "by" on an entry is the platform-verified writer ({ id, name }, or null
+  when the app's server wrote it). Never keep your own "author" field: a
+  browser can put any name in a value, but it cannot forge "by".
+
+  _appato.d.ts is written next to your code — the full typed surface, so a
+  wrong scope or a mistyped verb is an error before you deploy.
 
 BROWSER SDK — in your served HTML:
   <script type="module">
     import { appato } from "/_appato/client.js";
     appato.user                       // { id, email, name, org } — verified
-    appato.storage                    // same verbs as the server SDK
-    appato.watch("messages/", (entries) => { ... });
+    const { shared, mine, readonly } = appato.storage;
+        // same verbs per scope; internal/sql/forUser are absent here
+    shared.watch("messages/", (entries) => { ... });
         // live query: fires with ALL entries under the prefix immediately
         // and on every change, sorted by key. Reconnects re-sync
         // automatically — never write polling or WebSocket code.
+        // entries: [{ key, value, by, at }]
+    mine.watch("drafts/", (entries) => { ... });   // this person's own only
     const room = appato.channel();    // default channel "main"
     room.publish("reaction", { x: 1 });         // not echoed to sender
     room.on("reaction", (data, from) => ...);   // from = { id, name }
@@ -157,10 +199,11 @@ THREE TIERS — picking the right one matters
   to be replayed.
 
 RECIPES
-  chat       storage.push + appato.watch + presence
-  poll       storage.increment + appato.watch
-  tracker    storage.set/list + appato.watch
-  dashboard  appato.watch (+ server publish() for ticks)
+  chat       shared.push + shared.watch + presence
+  poll       shared.increment + shared.watch
+  tracker    shared.set/list + shared.watch
+  dashboard  readonly.watch (+ server publish() for ticks)
+  drafts     mine.set + mine.watch          (per-person, private)
   cursors    channel broadcast only
 
 SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
@@ -326,6 +369,30 @@ async function apiFetch(path, options = {}) {
   return res;
 }
 
+/**
+ * Write `_appato.d.ts` beside the app's source. Types are the only signal
+ * that catches a wrong scope (`storage.internal` from the browser, a typo'd
+ * verb) BEFORE the code runs — and the file doubles as in-context reference
+ * while the app is being written. Fetched rather than embedded so this CLI
+ * carries no second copy of the SDK contract (src/sdk.ts owns it).
+ *
+ * Best-effort by design: never fail a command over editor tooling.
+ */
+async function writeSdkTypes(root) {
+  try {
+    const cred = await credentials().catch(() => null);
+    const host = cred?.host ?? DEFAULT_HOST;
+    const res = await fetch(`${host}/api/sdk-types`);
+    if (!res.ok) return false;
+    const text = await res.text();
+    if (!text.includes("export declare const storage")) return false;
+    writeFileSync(join(root, "_appato.d.ts"), text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function checkCliVersion(res) {
   const min = res.headers.get("x-appato-cli-min");
   const latest = res.headers.get("x-appato-cli-latest");
@@ -476,6 +543,7 @@ async function create(args) {
     join(dir, "appato.json"),
     JSON.stringify({ org: body.org, app: body.slug, title, description }, null, 2) + "\n",
   );
+  await writeSdkTypes(dir);
   const rel = relative(process.cwd(), dir) || ".";
   console.log(`Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`);
   console.log(`URL (after first push): ${body.url}`);
@@ -519,6 +587,7 @@ async function clone(args) {
 
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, state.files ?? {});
+  await writeSdkTypes(dir);
   writeFileSync(
     join(dir, "appato.json"),
     JSON.stringify(
@@ -557,6 +626,10 @@ async function push(args = []) {
   }
   const files = collectFiles(root);
   if (Object.keys(files).length === 0) throw new Error("no files to push");
+  // Refresh types on every push so they track the deployed SDK (and appear
+  // for apps created before this existed). Collected first, so the file is
+  // never itself uploaded even on the run that creates it.
+  await writeSdkTypes(root);
   const sha = filesSha(files);
   const res = await apiFetch(`/api/apps/${org}/${app}/push`, {
     method: "POST",

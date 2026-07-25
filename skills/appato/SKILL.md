@@ -230,8 +230,25 @@ above them.
 
 Every app has a private, zero-setup data store and realtime hub — no
 provisioning, no credentials, no npm. (`appato sdk` prints this whole
-reference — API surface, tiers, recipes, limits — whenever you need it.) Data is scoped to the app and visible
-to all org members (it's an internal tool; there are no per-user secrets).
+reference — API surface, tiers, recipes, limits — whenever you need it.)
+**Every read and write names a scope.** There is no unscoped store — you
+pick who the data belongs to on every call, and the platform enforces it
+using the identity it already verified. You never write an auth check for
+this, and there is no way to reach another scope by spelling a clever key.
+
+| scope | who can read | who can write | reach for it when |
+|---|---|---|---|
+| `shared` | every org member | every org member | **the default.** Team data: messages, votes, rows, settings |
+| `mine` | just that person | just that person | the key belongs to ONE human: drafts, personal settings, a private checklist |
+| `readonly` | every org member | **your server only** | derived or authoritative data clients must not forge: leaderboards, computed summaries, config |
+| `internal` | **your server only** | your server only | browsers must never see it: API keys, audit logs, working state |
+
+Choosing is one question: **whose data is this?** If it's the team's,
+`shared`. If it's one person's, `mine`. If your server computes it, ask
+whether the browser should see it — `readonly` if yes, `internal` if no.
+
+`_appato.d.ts` sits next to your code with the full typed surface; a wrong
+scope or a mistyped verb is a type error before you ever deploy.
 
 Three tiers — picking the right one matters:
 
@@ -248,32 +265,49 @@ it belongs in storage.
 ```ts
 import { storage, publish } from "./_appato.js";
 
-await storage.set("polls/lunch", { question: "Where?", options: ["a", "b"] });
-const poll = await storage.get("polls/lunch");        // undefined if missing
-const key = await storage.push("messages/", { text }); // appends with a
+const { shared, readonly, internal } = storage;
+
+await shared.set("polls/lunch", { question: "Where?", options: ["a", "b"] });
+const poll = await shared.get("polls/lunch");         // undefined if missing
+const key = await shared.push("messages/", { text }); // appends with a
     // server-assigned time-sortable id → keys sort chronologically
-const n = await storage.increment("votes/pizza");      // atomic counter
-const msgs = await storage.list("messages/", { limit: 50, reverse: true });
-await storage.delete("polls/old");
+const n = await shared.increment("votes/pizza");      // atomic counter
+const msgs = await shared.list("messages/", { limit: 50, reverse: true });
+    // -> [{ key, value, by, at }]  — `by` is the verified writer, or null
+await shared.delete("polls/old");
+
+await readonly.set("stats", computed);   // browsers read this, can't change it
+await internal.set("apiKey", secret);    // browsers never see this at all
+
 await publish("refresh", { reason: "new data" });      // ephemeral broadcast
+
+// One person's private keys — the same data their browser sees as
+// `storage.mine`. Only the server can reach someone ELSE's, so approver
+// views, digests and exports go here, behind your own check.
+const drafts = await storage.forUser(user.id).list("drafts/");
 ```
 
-Keys are plain strings; use `/`-separated prefixes as collections
-(`messages/`, `votes/`). Values are JSON (≤128KB each; ~100MB per app).
+Keys are plain strings, relative to their scope; use `/`-separated prefixes
+as collections (`messages/`, `votes/`). Values are JSON (≤128KB each;
+~100MB per app). Nothing is reserved — the same key in two scopes is two
+different values.
 
 **SQL** for structured data (reports, joins, aggregates) — the app's own
-private SQLite:
+private SQLite. **Server-side only**: call it in your fetch handler and
+serve the result from your own route. It is not available in the browser.
 
 ```ts
 await storage.sql("CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY, who TEXT, amount REAL)");
-await storage.sql("INSERT INTO expenses (who, amount) VALUES (?, ?)", [user.name, 12.5]);
+await storage.sql("INSERT INTO expenses (who, amount) VALUES (?, ?)", [user.id, 12.5]);
 const { rows } = await storage.sql("SELECT who, SUM(amount) AS total FROM expenses GROUP BY who");
 await storage.sqlBatch([{ query: "...", params: [] }, { query: "..." }]); // one transaction
 ```
 
-Table names prefixed `_appato_` are reserved. Rule of thumb: KV + `watch`
-for anything live on screen; SQL when you need queries/joins (SQL tables do
-NOT emit realtime change events).
+Table names prefixed `_appato_` are reserved. Rule of thumb: **KV + `watch`
+for anything live on screen; SQL only for what KV can't do** — aggregates,
+joins, sorting by a value, more than ~500 rows. SQL tables emit NO realtime
+change events, so a SQL-backed screen has to re-fetch to update. Most small
+apps need no SQL at all.
 
 **Browser side** — in the HTML your app serves, import the client SDK (it
 knows the signed-in user; never build login or ask who the user is):
@@ -283,14 +317,27 @@ knows the signed-in user; never build login or ask who the user is):
   import { appato } from "/_appato/client.js";
 
   appato.user;                            // { id, email, name, org } — verified
-  appato.storage;                         // same verbs as the server SDK
+  const { shared, mine, readonly } = appato.storage;
+      // same verbs as the server, per scope. `internal`, `sql` and `forUser`
+      // are absent here — they are server-only, so calling one is an error
+      // you see immediately rather than a request that gets rejected.
 
   // Live view: cb fires with all entries under the prefix, immediately and
   // on every change (snapshot semantics — reconnects re-sync automatically).
-  appato.watch("messages/", (entries) => {
-    // entries: [{ key, value }] sorted by key (push keys = chronological)
-    render(entries.map((e) => e.value));
+  // `watch` is a verb on each scope, so a subscription never mixes them.
+  shared.watch("messages/", (entries) => {
+    // entries: [{ key, value, by, at }] sorted by key (push keys =
+    // chronological). `at` is the write time (always set). `by` is the
+    // platform-verified writer — { id, name } for a person, or NULL when
+    // the app's own server wrote the row, so always handle null. NEVER
+    // store your own "author" field for this: a browser can put anyone's
+    // name in a value, but it cannot forge `by`.
+    render(entries.map((e) => (e.by ? e.by.name : "system") + ": " + e.value.text));
   });
+
+  await shared.push("messages/", { text });   // anyone on the team can post
+  await mine.set("draft", text);              // only this person, ever
+  readonly.watch("stats", renderStats);       // server writes it; we display it
 
   const room = appato.channel();          // default channel "main"
   room.publish("reaction", { emoji: "🔥" });   // not echoed to sender
@@ -306,13 +353,15 @@ knows the signed-in user; never build login or ask who the user is):
 </script>
 ```
 
-Recipes: **chat** = `storage.push` + `appato.watch` + presence · **poll /
-tracker** = `increment`/`set` + `watch` · **dashboard** = `watch` (+ server
-`publish` for ticks) · **cursors / typing** = `channel` broadcast only.
+Recipes: **chat** = `shared.push` + `shared.watch` + presence · **poll /
+tracker** = `shared.increment`/`set` + `watch` · **dashboard** =
+`readonly.watch` (+ server `publish` for ticks) · **per-user drafts or
+settings** = `mine.set` + `mine.watch` · **cursors / typing** = `channel`
+broadcast only.
 
 `watch` is for prefixes with ≤500 entries (it delivers a full snapshot);
-paginate bigger data with `storage.list`/SQL. Writes from any tab, the
-server, or a coworker's browser all fan out to every watcher — you never
+paginate bigger data with `list`/SQL. Writes from any tab, the server, or a
+coworker's browser all fan out to every watcher in that scope — you never
 need polling, WebSocket code, reconnect handling, or a version check.
 
 ## Scheduled jobs (reminders, digests, nightly reports)
@@ -353,7 +402,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/cron/friday-reminder") {
       requireCron(request);          // 404s ordinary visitors
-      await storage.push("reminders/", { at: Date.now() });
+      await storage.shared.push("reminders/", { at: Date.now() });
       // Non-2xx = a failed run. What you RETURN is kept as the run's log
       // and shown in the console and CLI, so say what happened — "ok" tells
       // nobody anything three weeks later.
