@@ -180,12 +180,16 @@ above them.
 - `APPATO_CRONS app=<org>/<slug> count=<n> suspended=<true|false>` followed
   by one `APPATO_CRON name=<name> schedule=<json-string> tz=<zone>
   paused=<true|false> paused_by=<user|auto|none> next_at=<ms-epoch|none>
-  failures=<n> last_status=<ok|error|timeout|skipped|never>` per schedule.
-  `paused_by=auto` means the platform stopped it after repeated failures —
-  fix the handler, push, then `appato cron resume <name>`.
-- `APPATO_CRON_RUN app=<org>/<slug> name=<name> status=<ok|error|timeout>
-  http=<code|none> duration_ms=<n> error=<json-string>` — result of
-  `appato cron run`. Non-`ok` exits 2.
+  failures=<n> last_status=<ok|error|timeout|skipped|missed|running|never>`
+  per schedule. `paused_by=auto` means the platform stopped it after
+  repeated failures — fix the handler, push, then
+  `appato cron resume <name>`. `missed` is NOT a failure and needs no fix:
+  the app was archived, so those fires never happened and are never
+  replayed.
+- `APPATO_CRON_RUN app=<org>/<slug> name=<name>
+  status=<ok|error|timeout|skipped> http=<code|none> duration_ms=<n>
+  error=<json-string>` — result of `appato cron run`. Non-`ok` exits 2
+  (`skipped` means a previous run was still in flight — retry shortly).
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.
@@ -366,9 +370,12 @@ Behavior worth knowing (don't rebuild any of it):
 - Runs never overlap: if one is still going when the next fire is due, that
   fire is skipped.
 - Missed fires (platform downtime, archived app) are skipped, never
-  replayed in a burst.
+  replayed in a burst. Unarchiving records one `missed` entry covering the
+  whole gap so the history explains itself — that entry is a note, not an
+  error, and doesn't count toward the auto-pause.
 - Pausing/resuming lives in the console and CLI, not the manifest — a push
-  won't un-pause something a person deliberately paused.
+  won't un-pause something a person deliberately paused. Both need a
+  builder seat, same as pushing.
 - Schedules are part of the version, so restoring an old version restores
   the schedules that shipped with it. `appato sync` and `appato clone`
   refresh `appato.json`'s `crons` for you — don't hand-edit them to match
