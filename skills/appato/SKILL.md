@@ -188,8 +188,12 @@ above them.
   replayed.
 - `APPATO_CRON_RUN app=<org>/<slug> name=<name>
   status=<ok|error|timeout|skipped> http=<code|none> duration_ms=<n>
-  error=<json-string>` — result of `appato cron run`. Non-`ok` exits 2
-  (`skipped` means a previous run was still in flight — retry shortly).
+  error=<json-string> output=<json-string>` — result of `appato cron run`.
+  Non-`ok` exits 2 (`skipped` means a previous run was still in flight —
+  retry shortly). `output` is what the handler RETURNED on success (its
+  response body, capped) — check it to confirm the job did the right thing,
+  not merely that it answered 2xx. Empty for failures, whose body is folded
+  into `error` instead.
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.
@@ -350,7 +354,10 @@ export default {
     if (url.pathname === "/cron/friday-reminder") {
       requireCron(request);          // 404s ordinary visitors
       await storage.push("reminders/", { at: Date.now() });
-      return new Response("ok");     // non-2xx = a failed run
+      // Non-2xx = a failed run. What you RETURN is kept as the run's log
+      // and shown in the console and CLI, so say what happened — "ok" tells
+      // nobody anything three weeks later.
+      return new Response("queued 4 reminders");
     }
     ...
   },
@@ -359,8 +366,10 @@ export default {
 
 **Test it immediately — don't wait for Friday.** After pushing, run
 `appato cron run friday-reminder`: it fires the job now and prints the
-result. Then `appato cron` shows every schedule, its next run, and the last
-outcome. Do this before telling the user the schedule works.
+result, including whatever the handler returned — read that to confirm it
+did the right thing, not just that it answered 2xx. Then `appato cron` shows
+every schedule, its next run, and the last outcome. Do this before telling
+the user the schedule works.
 
 Behavior worth knowing (don't rebuild any of it):
 

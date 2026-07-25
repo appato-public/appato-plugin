@@ -724,8 +724,13 @@ async function cron(args = []) {
       const ok = res.ok && body.status === "ok";
       const detail = body.error ? ` — ${body.error}` : "";
       console.log(`${ok ? "✓" : "✗"} ran "${name}" (${body.status}, ${body.durationMs}ms)${detail}`);
+      // What the handler returned. The point of a test run is seeing what the
+      // job actually DID, not just that it exited 2xx.
+      if (body.output) {
+        for (const line of String(body.output).split("\n")) console.log(`     ${line}`);
+      }
       console.log(
-        `APPATO_CRON_RUN app=${org}/${app} name=${name} status=${body.status} http=${body.httpStatus ?? "none"} duration_ms=${body.durationMs ?? 0} error=${JSON.stringify(body.error ?? "")}`,
+        `APPATO_CRON_RUN app=${org}/${app} name=${name} status=${body.status} http=${body.httpStatus ?? "none"} duration_ms=${body.durationMs ?? 0} error=${JSON.stringify(body.error ?? "")} output=${JSON.stringify(body.output ?? "")}`,
       );
       if (!ok) process.exit(2);
       return;
