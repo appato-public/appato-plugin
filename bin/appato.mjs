@@ -908,6 +908,9 @@ async function logs(args = []) {
   }
   // Client↔server join: a browser-side failed fetch and the server error it
   // hit share a request id — print them as one story, not two loose rows.
+  // Twin: serverErrorsByRid in web/src/features/apps/logs.ts — keep the join
+  // rule (rid + error level + http/app source) identical, or the CLI and
+  // the console tell different stories about the same request.
   const serverErrByRid = new Map();
   for (const e of events) {
     if (e.rid && e.level === "error" && (e.source === "http" || e.source === "app")) {
@@ -930,10 +933,15 @@ async function logs(args = []) {
   for (const e of events) {
     const v = e.v != null && e.v !== body.deployedVersion ? ` [v${e.v}]` : "";
     const who = e.userEmail ? ` (${e.userEmail})` : "";
+    // Per-row truncation (L5): the row itself says capture cut it, not just
+    // the summary's single boolean. Twin: the truncated chip in
+    // web/src/features/apps/Logs.tsx EventRow.
+    const cut = e.truncated ? " [truncated]" : "";
     // NO duration printed until `request.ms` means response time — it is
     // currently time-to-headers, which excludes the slowest part of a
-    // streamed response. Twin: EventRow in web/src/features/apps/Logs.tsx.
-    console.log(`${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}`);
+    // streamed response. The console shows it labeled "server time"; here
+    // the flat line stays duration-free (agents read ms as latency).
+    console.log(`${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}${cut}`);
     if (e.source === "browser" && e.rid) {
       const srv = serverErrByRid.get(e.rid);
       if (srv) console.log(`    ↳ server, same request: ${srv.message}`);
