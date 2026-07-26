@@ -22,8 +22,9 @@ import { homedir } from "node:os";
 import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 
-const VERSION = "0.4.0";
+const VERSION = "0.6.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -558,7 +559,10 @@ async function clone(args) {
   if (existsSync(dir) && readdirSync(dir).length > 0) {
     throw new Error(`${relative(process.cwd(), dir)}/ already exists and is not empty`);
   }
-  const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
+  // ?files=1 — contents are opt-in, and a clone is the one command that
+  // genuinely wants the whole set. Without it this wrote an empty checkout
+  // and reported success.
+  const stateRes = await apiFetch(`/api/apps/${org}/${slug}?files=1`);
   const state = await stateRes.json();
   if (stateRes.status === 404) {
     throw new Error(`no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`);
@@ -608,24 +612,32 @@ async function push(args = []) {
   const files = collectFiles(root);
   if (Object.keys(files).length === 0) throw new Error("no files to push");
   const sha = filesSha(files);
-  const res = await apiFetch(`/api/apps/${org}/${app}/push`, {
-    method: "POST",
-    // title/description/crons come from appato.json — the manifest is the
-    // source of truth for app metadata AND schedules, synced on every push
-    // (crons replace-all: omitting one removes it). Only a MISSING key
-    // means "no schedules"; anything else is forwarded as-is so the server
-    // rejects it — coercing here would turn a typo (`"crons": {…}`) into a
-    // silent delete of every job.
-    body: JSON.stringify({
-      files,
+  // Send only what differs from the version already on the server. The base
+  // comes from a fresh manifest fetch (~1 KB) rather than a local cache: the
+  // CLI keeps no state on disk by design (see the header comment), and a
+  // cache is the exact thing that goes stale and then silently pushes the
+  // wrong delta. Source is hashed fresh either way (docs/SYNC.md S6), so
+  // the fetch costs a round trip and buys correctness outright.
+  let res = await pushRequest(org, app, files, deltaAgainst(await safeManifest(org, app), files), {
+    message,
+    details,
+    title,
+    description,
+    crons: crons === undefined ? [] : crons,
+  });
+  let body = await res.json();
+  if (res.status === 409 && body.code === "base_stale") {
+    // The server could not reconstruct what we described — someone pushed
+    // in between, or our view was wrong. Say the whole thing instead.
+    res = await pushRequest(org, app, files, null, {
       message,
       details,
       title,
       description,
       crons: crons === undefined ? [] : crons,
-    }),
-  });
-  const body = await res.json();
+    });
+    body = await res.json();
+  }
   if (res.status === 422) {
     console.error(`✗ pushed v${body.version}, but deploy FAILED:\n  ${body.deployError}`);
     console.error("Fix the error above and push again.");
@@ -640,23 +652,25 @@ async function push(args = []) {
 async function sync(args = []) {
   const { org, app, root } = appConfig();
   const force = args.includes("--force");
-  const res = await apiFetch(`/api/apps/${org}/${app}`);
-  const state = await res.json();
-  if (!res.ok) throw new Error(state.error || `sync failed (${res.status})`);
+  // The manifest, not the files: {path: sha256} is a few hundred bytes
+  // against the whole app, and it is enough to decide everything below.
+  // Content is fetched per differing path, addressed by hash so a push
+  // landing mid-sync cannot swap the bytes underneath us.
+  const man = await fetchManifest(org, app);
   // Schedules live in appato.json, which is excluded from the file hashes —
   // so without this a sync could report "up to date" while the manifest
   // held stale schedules, and the next push would restore them over the
   // real ones. Refresh them first, whatever the file comparison decides.
   const cronsChanged = writeManifestCrons(root, await fetchCrons(org, app, "syncing"));
   if (cronsChanged) console.log("✓ schedules updated in appato.json");
-  const remote = state.files ?? {};
   const local = collectFiles(root);
   const localSha = filesSha(local);
-  const remoteSha = filesSha(remote);
+  const localHashes = hashFiles(local);
+  const changed = manifestDiff(localHashes, man.files);
 
-  if (localSha === remoteSha) {
-    console.log(`Already up to date (v${state.latestVersion}).`);
-    console.log(`APPATO_SYNCED app=${org}/${app} version=${state.latestVersion} changed=false sha=${remoteSha}`);
+  if (changed.length === 0) {
+    console.log(`Already up to date (v${man.version}).`);
+    console.log(`APPATO_SYNCED app=${org}/${app} version=${man.version} changed=false sha=${localSha}`);
     return;
   }
 
@@ -669,22 +683,34 @@ async function sync(args = []) {
     if (!vres.ok) throw new Error(vbody.error || `sync failed (${vres.status})`);
     const match = vbody.versions.find((v) => v.sha === localSha);
     if (!match && Object.keys(local).length > 0) {
-      const changed = diffFiles(local, remote);
       console.error(`✗ local files don't match any pushed version — syncing would discard changes in:`);
       for (const p of changed) console.error(`    ${p}`);
       console.error(`Push them first (appato push -m "...") or discard them: appato sync --force`);
-      console.log(`APPATO_SYNC_BLOCKED app=${org}/${app} latest_version=${state.latestVersion} local_sha=${localSha}`);
+      console.log(`APPATO_SYNC_BLOCKED app=${org}/${app} latest_version=${man.version} local_sha=${localSha}`);
       process.exit(2);
     }
   }
 
-  const changed = diffFiles(local, remote);
-  writeFiles(root, remote);
-  for (const path of Object.keys(local)) {
-    if (!(path in remote)) unlinkSync(join(root, path));
+  // Download EVERYTHING before touching the working tree. Interleaving the
+  // two meant a failure partway through left a checkout that was half one
+  // version and half another — and `filesSha` of that mixture matches no
+  // pushed version, so the next sync would refuse to run and the next push
+  // would commit the mixture.
+  const incoming = {};
+  for (const path of changed) {
+    if (path in man.files) incoming[path] = await fetchFile(org, app, path, man.files[path]);
   }
-  console.log(`✓ synced to v${state.latestVersion} — ${changed.length} file(s) changed`);
-  console.log(`APPATO_SYNCED app=${org}/${app} version=${state.latestVersion} changed=true files=${changed.length} sha=${remoteSha}`);
+  writeFiles(root, incoming);
+  for (const path of changed) {
+    if (!(path in man.files)) unlinkSync(join(root, path));
+  }
+  // Local now equals the pushed version, so filesSha of the new tree IS
+  // that version's sha — the same 12-hex contract every other command
+  // emits. Deliberately not the manifest's sha256: they are different
+  // hashes with different jobs (docs/SYNC.md S4).
+  const syncedSha = filesSha(collectFiles(root));
+  console.log(`✓ synced to v${man.version} — ${changed.length} file(s) changed`);
+  console.log(`APPATO_SYNCED app=${org}/${app} version=${man.version} changed=true files=${changed.length} sha=${syncedSha}`);
 }
 
 async function rollback(args = []) {
@@ -983,12 +1009,20 @@ async function status(json = false) {
   if (!root) return workspaceStatus(json, args.includes("--all"));
 
   const { org, app } = appConfig();
-  const res = await apiFetch(`/api/apps/${org}/${app}`);
+  // Two small reads: app metadata (no file contents) and the manifest.
+  // `status` used to download the entire app on every invocation — which
+  // the agent skill runs every turn — purely to produce a list of changed
+  // FILENAMES. Comparing hashes answers exactly the same question for a
+  // few hundred bytes (docs/SYNC.md).
+  const [res, man] = await Promise.all([
+    apiFetch(`/api/apps/${org}/${app}`),
+    fetchManifest(org, app),
+  ]);
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
   const local = collectFiles(root);
   const localSha = filesSha(local);
-  const changedFiles = diffFiles(local, body.files ?? {});
+  const changedFiles = manifestDiff(hashFiles(local), man.files);
   const dirty = changedFiles.length > 0;
 
   // Distinguish "behind" (local equals an older pushed version — sync) from
@@ -1201,6 +1235,16 @@ function writeFiles(root, files) {
 }
 
 /**
+ * Content address for one file.
+ * MUST stay byte-identical to sha256Hex() in src/hash.ts on the server —
+ * these are the addresses the manifest is expressed in, so a divergence
+ * would make every file look changed.
+ */
+function sha256Hex(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/**
  * Deterministic short hash of a file set (path + content, sorted).
  * MUST stay byte-identical to filesSha() in src/hash.ts on the server — sync
  * compares this against version shas from the API.
@@ -1213,10 +1257,124 @@ function filesSha(files) {
   return h.digest("hex").slice(0, 12);
 }
 
-/** Paths that differ between local files and the last-pushed version. */
-function diffFiles(local, remote) {
+/** {path: sha256} for a local file set — the shape the server publishes. */
+function hashFiles(files) {
+  const out = {};
+  for (const [path, content] of Object.entries(files)) out[path] = sha256Hex(content);
+  return out;
+}
+
+/** Paths that differ between two {path: sha256} maps, including either
+ *  side's additions and deletions. Comparing hashes rather than content is
+ *  what lets `status` answer without downloading anything. */
+function manifestDiff(local, remote) {
   const paths = new Set([...Object.keys(local), ...Object.keys(remote)]);
   return [...paths].filter((p) => local[p] !== remote[p]).sort();
+}
+
+async function fetchManifest(org, app) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/manifest`);
+  const body = await res.json();
+  // A 404 is ambiguous: "this app has no versions yet" and "this app does
+  // not exist" look identical from here. Only the first may become an empty
+  // manifest — treating the second that way makes a deleted or renamed app
+  // look like an app with no files, and `sync --force` then unlinks the
+  // entire local checkout on the strength of it.
+  if (res.status === 404) {
+    if (body.code === "no_versions") return { version: 0, sha256: "", files: {} };
+    throw new Error(
+      `no app "${app}" in ${org} — it may have been deleted or renamed. Run \`appato status --all\` to list the org's apps.`,
+    );
+  }
+  if (!res.ok) throw new Error(body.error || `could not read ${org}/${app} (${res.status})`);
+  return body;
+}
+
+/**
+ * The manifest to diff a push against, or null to send everything.
+ *
+ * Swallows every failure on purpose. The manifest is an OPTIMIZATION for
+ * push — it decides how much we send, never whether we can send. A new app
+ * has no versions, a network blip has no manifest, and neither is a reason
+ * to refuse someone's work; both just mean the push carries the full set,
+ * which is what it always used to do. Real problems (no such app, no seat,
+ * archived) surface from the push itself, which is the request that
+ * actually knows.
+ *
+ * Note this is the opposite call from sync, where a missing manifest was
+ * treated as an empty app and DELETED the checkout. The difference is what
+ * failure costs: bytes here, data there.
+ */
+async function safeManifest(org, app) {
+  try {
+    const man = await fetchManifest(org, app);
+    return man.version > 0 ? man : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What differs between the server's manifest and the local tree, or null if
+ * there is no usable base. `files` carries only changed/added content;
+ * `deleted` names paths the server has and we do not.
+ */
+function deltaAgainst(man, local) {
+  if (!man) return null;
+  const localHashes = hashFiles(local);
+  const changed = {};
+  for (const [path, content] of Object.entries(local)) {
+    if (man.files[path] !== localHashes[path]) changed[path] = content;
+  }
+  const deleted = Object.keys(man.files).filter((p) => !(p in local));
+  return { base: man.version, files: changed, deleted, sha256: manifestSha(localHashes) };
+}
+
+/**
+ * POST a push. Gzipped, signalled by a header we own rather than
+ * Content-Encoding — workerd does not reliably strip that coding after
+ * decompressing, so a Worker cannot tell whether it holds compressed bytes
+ * (docs/SYNC.md S8).
+ *
+ * `delta` null means "send the whole set", which is also what an older
+ * server understands: `base` absent is a full push (S5).
+ */
+async function pushRequest(org, app, files, delta, meta) {
+  // title/description/crons come from appato.json — the manifest is the
+  // source of truth for app metadata AND schedules, synced on every push
+  // (crons replace-all: omitting one removes it). This half of the body is
+  // byte-for-byte what it has always been; the sha256 check covers files
+  // only, so a delta must never abbreviate it.
+  const payload = delta
+    ? { ...meta, base: delta.base, files: delta.files, deleted: delta.deleted, sha256: delta.sha256 }
+    : { ...meta, files };
+  const gz = gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
+  return apiFetch(`/api/apps/${org}/${app}/push`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-Appato-Encoding": "gzip" },
+    body: gz,
+  });
+}
+
+/**
+ * Whole-set validator over a {path: sha256} map.
+ * MUST stay byte-identical to manifestSha() in src/hash.ts — a delta push is
+ * only safe because both ends compute this the same way: this states what
+ * the full set hashes to, the server reconstructs and checks.
+ */
+function manifestSha(files) {
+  return sha256Hex(JSON.stringify(Object.fromEntries(Object.entries(files).sort())));
+}
+
+/** One file's content, addressed by hash so a push landing mid-sync can't
+ *  swap the bytes we asked for. */
+async function fetchFile(org, app, path, sha256) {
+  const res = await apiFetch(
+    `/api/apps/${org}/${app}/file?path=${encodeURIComponent(path)}&sha256=${sha256}`,
+  );
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `could not fetch ${path} (${res.status})`);
+  return body.content;
 }
 
 // Same contract as web/src/lib/time.ts ago(): the "ago" is included.
