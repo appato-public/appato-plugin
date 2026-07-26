@@ -257,6 +257,15 @@ above them.
   never sees it; don't route on it.
 - Keep apps small and single-purpose. Prefer one screen that does the job
   over navigation and settings pages.
+- **The URL is part of the UI.** When the app does have distinct views —
+  tabs, a selected item, a filter that changes what's on screen — put the
+  view in the URL and keep it updated as the user navigates, so back,
+  refresh, and a pasted link all land on the same view. A few lines of
+  `history.pushState` + one `popstate` listener is enough — no router
+  library. Have the fetch handler serve the app shell for every view path
+  so deep links survive a reload (an app that's a single static
+  `index.html` can use `#/...` hash paths instead). Prefer human-readable
+  slugs over opaque ids: `/polls/lunch-spot`, not `/poll?id=8f3a2c`.
 ## Shared data & realtime
 
 Every app has a private, zero-setup data store and realtime hub — no
