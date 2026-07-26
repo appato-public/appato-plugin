@@ -23,7 +23,7 @@ import { join, relative, dirname, basename } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
-const VERSION = "0.3.4";
+const VERSION = "0.4.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -56,7 +56,7 @@ try {
     case "cron": case "crons": await cron(args); break;
     case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
-    case "logs": console.log("logs: not implemented yet — coming in a future release"); break;
+    case "logs": await logs(args); break;
     case "sdk": case "howto": case "docs": sdkHelp(); break;
     case "install": await install(); break;
     case "upgrade": await install(); break;
@@ -104,7 +104,13 @@ usage:
                             history is append-only; see appato history)
   appato sdk                how to build apps: platform APIs (storage,
                             realtime, identity), conventions, recipes
-  appato logs               (soon) tail the app's logs
+  appato logs [--all] [--since <2h|30m|7d>] [-n <count>] [--errors]
+              [--user <email>] [--source <csv>] [--json]
+                            the app's recent logs, errors first — a bounded
+                            snapshot since the deployed version went live
+                            (--all: everything retained; exits immediately)
+  appato logs --console [--since <1h|24h>] [-n <count>] [--json]
+                            raw server console.log output (~7-day window)
   appato install            install/update the CLI into ~/.appato/bin
   appato upgrade            same as install (update to the latest version)`);
 }
@@ -230,7 +236,11 @@ LIMITS (flat, per app)
 
 WORKFLOW
   appato status -> sync before editing -> edit -> appato push -m "..."
-  (push output ends with a machine-readable APPATO_* line; parse that)`);
+  (push output ends with a machine-readable APPATO_* line; parse that)
+  LOGS: after a failing probe or a bug report, run appato logs — an
+  errors-first bounded snapshot since the deployed version went live
+  (exits immediately; it never follows). Check it BEFORE adding debug
+  endpoints or guessing at a cause.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +825,146 @@ async function cron(args = []) {
   }
 }
 
+/**
+ * Runtime logs (docs/LOGS.md L13): a bounded snapshot that EXITS — never a
+ * blocking follow. One request returns error groups, the timeline slice,
+ * and the summary; errors print first, stacks are never truncated (an
+ * agent debugging from frames needs every one). Default window: since the
+ * deployed version went live (the server defaults when no `since` is
+ * sent), so a post-push check sees only what that push produced. The final
+ * APPATO_LOGS line is part of the machine contract (see push above).
+ */
+async function logs(args = []) {
+  if (args.includes("--console")) return consoleLogs(args);
+  const { org, app } = appConfig();
+  const params = new URLSearchParams();
+  if (args.includes("--all")) params.set("since", "0");
+  else if (flagValue(args, "--since") !== undefined) {
+    params.set("since", String(parseSince(flagValue(args, "--since"))));
+  }
+  if (flagValue(args, "-n") !== undefined) params.set("limit", flagValue(args, "-n"));
+  if (args.includes("--errors")) params.set("errors", "1");
+  if (flagValue(args, "--user") !== undefined) params.set("user", flagValue(args, "--user"));
+  if (flagValue(args, "--source") !== undefined) params.set("source", flagValue(args, "--source"));
+
+  const qs = params.toString();
+  const res = await apiFetch(`/api/apps/${org}/${app}/logs${qs ? `?${qs}` : ""}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `logs failed (${res.status})`);
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+
+  const s = body.summary;
+  const groups = body.groups ?? [];
+  const events = [...(body.events ?? [])].sort((a, b) => a.ts - b.ts);
+
+  // Errors first (L13): grouped, with the sample's FULL stack — never cut.
+  if (groups.length > 0) {
+    console.log(`── errors ──`);
+    for (const g of groups) {
+      console.log(
+        `✗ ${g.type}: ${g.sample?.message ?? ""} ×${g.count}  first v${g.firstV} ${ago(g.firstTs)} · last v${g.lastV} ${ago(g.lastTs)}`,
+      );
+      for (const f of g.sample?.exception?.frames ?? []) {
+        console.log(`    at ${f.function} (${f.filename}:${f.lineno}:${f.colno})`);
+      }
+      // Auto-blame: which push likely introduced this (server-computed).
+      if (g.blame) {
+        console.log(
+          g.blame.file
+            ? `    introduced in v${g.blame.version} ("${g.blame.message}") — touched ${g.blame.file}`
+            : `    first seen in v${g.blame.version} ("${g.blame.message}")`,
+        );
+      }
+    }
+  }
+  // Client↔server join: a browser-side failed fetch and the server error it
+  // hit share a request id — print them as one story, not two loose rows.
+  const serverErrByRid = new Map();
+  for (const e of events) {
+    if (e.rid && e.level === "error" && (e.source === "http" || e.source === "app")) {
+      serverErrByRid.set(e.rid, e);
+    }
+  }
+  // Client-side drop reports (L5): the browser SDK ships its own drop
+  // counts as a client_report event with {reason: count} in context —
+  // render the counts and total them for the machine line's
+  // client_dropped. Twin: eventText in web/src/features/apps/logs.ts —
+  // keep the rendered text identical.
+  let clientDropped = 0;
+  const dropReport = (e) => {
+    if (e.message !== "client_report" || typeof e.context !== "object" || !e.context || Array.isArray(e.context)) return null;
+    const counts = Object.entries(e.context).filter(([, n]) => typeof n === "number" && n > 0);
+    if (counts.length === 0) return null;
+    for (const [, n] of counts) clientDropped += n;
+    return `browser SDK dropped events: ${counts.map(([reason, n]) => `${reason} ×${n}`).join(", ")}`;
+  };
+  for (const e of events) {
+    const v = e.v != null && e.v !== body.deployedVersion ? ` [v${e.v}]` : "";
+    const who = e.userEmail ? ` (${e.userEmail})` : "";
+    console.log(`${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}`);
+    if (e.source === "browser" && e.rid) {
+      const srv = serverErrByRid.get(e.rid);
+      if (srv) console.log(`    ↳ server, same request: ${srv.message}`);
+    }
+  }
+  if (s.entries === 0 && groups.length === 0) {
+    const deployed = body.deployedVersion
+      ? `since v${body.deployedVersion} deployed${body.deployedAt ? ` ${ago(body.deployedAt)}` : ""}`
+      : "yet";
+    console.log(
+      `No log events ${deployed}. (Server console.log output lives in the firehose — coming to \`appato logs --console\`.)`,
+    );
+  }
+  if (s.stale > 0) {
+    console.log(
+      `⚠ ${s.stale} error(s) are from versions older than v${body.deployedVersion} — likely pre-fix; ignore unless they recur on the current version.`,
+    );
+  }
+  // L5: the picture may be incomplete, but never silently so.
+  if (s.dropped > 0 || clientDropped > 0 || s.truncated) {
+    const parts = [];
+    if (s.dropped > 0) parts.push(`${s.dropped} event(s) were dropped at capture (rate/size caps)`);
+    if (clientDropped > 0) parts.push(`${clientDropped} event(s) were dropped in the browser before sending`);
+    if (s.truncated) parts.push(`some entries are truncated`);
+    console.log(`⚠ ${parts.join("; ")} — the picture above is incomplete.`);
+  }
+  console.log(
+    `APPATO_LOGS app=${org}/${app} deployed_version=${body.deployedVersion ?? "none"} window_since=${body.since} entries=${s.entries} errors=${s.errors} error_groups=${s.errorGroups} stale_errors=${s.stale} dropped=${s.dropped} client_dropped=${clientDropped} truncated=${!!s.truncated}`,
+  );
+}
+
+/** The server console firehose (docs/LOGS.md L3): full console.log output
+ * from Workers Logs, ~7-day retention, 1h window by default. Separate from
+ * the durable timeline — this is print-debugging's home. */
+async function consoleLogs(args) {
+  const { org, app } = appConfig();
+  const params = new URLSearchParams();
+  const since = flagValue(args, "--since");
+  if (since) params.set("since", String(parseSince(since)));
+  const n = flagValue(args, "-n");
+  if (n) params.set("limit", n);
+  const res = await apiFetch(`/api/apps/${org}/${app}/logs/console?${params}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `console logs failed (${res.status})`);
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  const events = [...(body.events ?? [])].sort((a, b) => a.ts - b.ts);
+  for (const e of events) {
+    const req = e.request ? ` [${e.request.method} ${e.request.path}]` : "";
+    console.log(`${hms(e.ts)} ${e.level} ${e.message}${req}`);
+    if (e.stack) for (const l of String(e.stack).split("\n")) console.log(`    ${l.trim()}`);
+  }
+  if (events.length === 0) {
+    console.log(`No server console output in this window (default 1h; --since 24h reaches back; ~7-day retention).`);
+  }
+  console.log(`APPATO_LOGS_CONSOLE app=${org}/${app} window_since=${body.since} entries=${events.length}`);
+}
+
 /** First org membership — the default when --org isn't given. */
 async function defaultOrg() {
   const res = await apiFetch("/api/me");
@@ -1048,6 +1198,22 @@ function until(msEpoch) {
   if (s < 3600) return `in ${Math.round(s / 60)}m`;
   if (s < 86400) return `in ${Math.round(s / 3600)}h`;
   return `in ${Math.round(s / 86400)}d`;
+}
+
+/** Short local clock time (HH:MM:SS) for log lines. */
+function hms(msEpoch) {
+  return new Date(msEpoch).toTimeString().slice(0, 8);
+}
+
+/** "--since 2h" (s/m/h/d suffixes) → an absolute ms epoch; raw ms pass through. */
+function parseSince(raw) {
+  const rel = /^(\d+(?:\.\d+)?)([smhd])$/.exec(raw);
+  if (rel) {
+    const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2]];
+    return Date.now() - Math.round(Number(rel[1]) * unit);
+  }
+  if (/^\d+$/.test(raw)) return Number(raw);
+  throw new Error(`--since expects a duration like 30m, 2h, 7d, or an ms epoch (got "${raw}")`);
 }
 
 function flagValue(argv, flag) {

@@ -121,15 +121,22 @@ below the current directory. You never need to be in a special directory.
    lists them), run `appato rollback <version>` — it restores that
    version's files as a new version (history is append-only; nothing is
    lost) — then `appato sync` to update the local copy.
-8. **Before ending ANY response where you touched app files, push — and
+8. **When a deployed app misbehaves** — a probe of the app URL fails, the
+   user reports a bug, or a response carries the `x-appato-error` header —
+   run `appato logs` FIRST, before adding debug endpoints or guessing (it's
+   a bounded snapshot that exits immediately; the platform's error page
+   tells people to "run appato logs" on purpose). If `errors` > 0 for the
+   current deployed version after your push, investigate before ending the
+   turn, and mention the finding in your deploy-status statement.
+9. **Before ending ANY response where you touched app files, push — and
    state the deploy status explicitly**, using the values from the CLI's
    machine line (below): e.g. "Deployed to <url> (v12, sha 3f9a01c2b4d6)."
    or "⚠ NOT deployed — the last push failed: <reason>." Never end a turn
    leaving the user unsure whether the live app matches what you built. If
    you changed files but cannot push (not logged in, CLI missing), say so
    and tell the user what's needed.
-9. **If any appato output mentions an upgrade** (or says the CLI is too
-   old), run `appato upgrade`, then retry.
+10. **If any appato output mentions an upgrade** (or says the CLI is too
+    old), run `appato upgrade`, then retry.
 
 ## CLI output contract
 
@@ -198,6 +205,21 @@ above them.
   `APPATO_CRON_RESUMED app=<org>/<slug> name=<name>` — result of `appato
   cron pause|resume <name>`. Pausing is runtime state that survives
   pushes: a later deploy will NOT silently resume a paused schedule.
+- `APPATO_LOGS app=<org>/<slug> deployed_version=<n|none> window_since=<ms>
+  entries=<n> errors=<n> error_groups=<n> stale_errors=<n> dropped=<n>
+  client_dropped=<n> truncated=<true|false>` — printed by `appato logs`.
+  `stale_errors` counts errors from versions older than the deployed one —
+  pre-fix ghosts; ignore them unless they recur on the current version.
+  `client_dropped` totals the events the browser SDK dropped before sending
+  (dedup, rate caps — summed from the window's client_report events).
+  Nonzero `dropped`, nonzero `client_dropped`, or `truncated=true` means
+  the picture is incomplete — say so rather than guessing at what's
+  missing.
+- `APPATO_LOGS_CONSOLE app=<org>/<slug> window_since=<ms> entries=<n>` —
+  printed by `appato logs --console`: raw server `console.log` output from
+  the ~7-day firehose (default window 1h; `--since 24h` reaches back). Use
+  it when the durable timeline shows an error but you need the app's own
+  print-debugging output around it.
 
 `appato status --json` prints one JSON object (same fields plus
 `changedFiles`) when you need the full picture.
