@@ -904,6 +904,9 @@ async function logs(args = []) {
   for (const e of events) {
     const v = e.v != null && e.v !== body.deployedVersion ? ` [v${e.v}]` : "";
     const who = e.userEmail ? ` (${e.userEmail})` : "";
+    // NO duration printed until `request.ms` means response time — it is
+    // currently time-to-headers, which excludes the slowest part of a
+    // streamed response. Twin: EventRow in web/src/features/apps/Logs.tsx.
     console.log(`${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}`);
     if (e.source === "browser" && e.rid) {
       const srv = serverErrByRid.get(e.rid);
@@ -915,7 +918,7 @@ async function logs(args = []) {
       ? `since v${body.deployedVersion} deployed${body.deployedAt ? ` ${ago(body.deployedAt)}` : ""}`
       : "yet";
     console.log(
-      `No log events ${deployed}. (Server console.log output lives in the firehose — coming to \`appato logs --console\`.)`,
+      `No log events ${deployed}. (Server console.log output lives in the firehose: \`appato logs --console\`.)`,
     );
   }
   if (s.stale > 0) {
