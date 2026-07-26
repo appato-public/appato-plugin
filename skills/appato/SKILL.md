@@ -244,6 +244,11 @@ above them.
   no package.json, no imports from npm, no bundler. Split code across
   relative-imported files freely. Serve HTML/CSS/JS inline from the fetch
   handler (template strings are fine and normal here).
+- **Non-code files are served at their path** — put images, fonts, CSS or
+  other assets in the app directory and reference them the way you would
+  anywhere else (`<img src="/logo.png">`). A shipped `.html` file serves at
+  its path with standard static-site behavior (`index.html` at `/`,
+  `page.html` at `/page`), shadowing your fetch handler for that path.
 - `./_appato.js` is injected by the platform at deploy time — import it, but
   never create that file.
 - For state, use the built-in storage + realtime APIs (next section). Do not

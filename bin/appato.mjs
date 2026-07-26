@@ -24,7 +24,7 @@ import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -41,6 +41,9 @@ const IGNORE = new Set([
   "_appato.d.ts",
 ]);
 const MAX_FILE_BYTES = 512 * 1024;
+// Server-enforced too (PlanLimits.maxAssetBytes, the source of truth —
+// Cloudflare's 25 MiB per-asset serving ceiling). Refuse, never skip.
+const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 
 const [, , command, ...args] = process.argv;
 
@@ -559,20 +562,28 @@ async function clone(args) {
   if (existsSync(dir) && readdirSync(dir).length > 0) {
     throw new Error(`${relative(process.cwd(), dir)}/ already exists and is not empty`);
   }
-  // ?files=1 — contents are opt-in, and a clone is the one command that
-  // genuinely wants the whole set. Without it this wrote an empty checkout
-  // and reported success.
-  const stateRes = await apiFetch(`/api/apps/${org}/${slug}?files=1`);
+  const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
   const state = await stateRes.json();
   if (stateRes.status === 404) {
     throw new Error(`no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`);
   }
   if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
 
+  // The manifest names every file; contents come one raw fetch per path,
+  // addressed by hash (race-free against a push landing mid-clone) — same
+  // loop as sync, because no endpoint returns a full file set as JSON
+  // (docs/SYNC.md S33). fetchManifest's no_versions branch answers an empty
+  // set for a new app; "no such app" was already excluded above.
+  const man = await fetchManifest(org, slug);
+  const incoming = {};
+  for (const [path, hash] of Object.entries(man.files)) {
+    incoming[path] = await fetchFile(org, slug, path, hash);
+  }
+
   const crons = await fetchCrons(org, slug, "cloning");
 
   mkdirSync(dir, { recursive: true });
-  writeFiles(dir, state.files ?? {});
+  writeFiles(dir, incoming);
   writeFileSync(
     join(dir, "appato.json"),
     JSON.stringify(
@@ -588,7 +599,7 @@ async function clone(args) {
     ) + "\n",
   );
   const rel = relative(process.cwd(), dir);
-  const fileCount = Object.keys(state.files ?? {}).length;
+  const fileCount = Object.keys(man.files).length;
   console.log(
     state.latestVersion > 0
       ? `Cloned ${org}/${slug} v${state.latestVersion} (${fileCount} files) → ./${rel}/`
@@ -609,33 +620,46 @@ async function push(args = []) {
       'a change summary is required: appato push -m "one-line, user-facing summary" [--details "a short paragraph: what changed for users, why, and any notable decisions"]',
     );
   }
-  const files = collectFiles(root);
-  if (Object.keys(files).length === 0) throw new Error("no files to push");
-  const sha = filesSha(files);
+  const { files, binary } = collectFiles(root);
+  if (Object.keys(files).length === 0 && Object.keys(binary).length === 0) {
+    throw new Error("no files to push");
+  }
+  const binHashes = binaryHashes(binary);
+  const sha = localSetSha(files, binHashes);
+  const meta = {
+    message,
+    details,
+    title,
+    description,
+    crons: crons === undefined ? [] : crons,
+  };
   // Send only what differs from the version already on the server. The base
   // comes from a fresh manifest fetch (~1 KB) rather than a local cache: the
   // CLI keeps no state on disk by design (see the header comment), and a
   // cache is the exact thing that goes stale and then silently pushes the
   // wrong delta. Source is hashed fresh either way (docs/SYNC.md S6), so
   // the fetch costs a round trip and buys correctness outright.
-  let res = await pushRequest(org, app, files, deltaAgainst(await safeManifest(org, app), files), {
-    message,
-    details,
-    title,
-    description,
-    crons: crons === undefined ? [] : crons,
-  });
+  const man = await safeManifest(org, app);
+  // Binary bytes go up FIRST, as raw blob PUTs (never inside the JSON —
+  // S16), and only the ones the server doesn't already resolve: an
+  // unchanged image uploads once, ever. The push then carries references.
+  const known = new Set(Object.values(man?.files ?? {}));
+  for (const [path, bytes] of Object.entries(binary)) {
+    if (!known.has(binHashes[path])) await putBlob(org, app, path, bytes);
+  }
+  let res = await pushRequest(org, app, files, binHashes, deltaAgainst(man, files, binHashes), meta);
   let body = await res.json();
+  if (res.status === 409 && body.code === "missing_blob") {
+    // The base manifest told us a blob existed but the push disagreed —
+    // upload everything we have and say the whole thing.
+    for (const [path, bytes] of Object.entries(binary)) await putBlob(org, app, path, bytes);
+    res = await pushRequest(org, app, files, binHashes, null, meta);
+    body = await res.json();
+  }
   if (res.status === 409 && body.code === "base_stale") {
     // The server could not reconstruct what we described — someone pushed
     // in between, or our view was wrong. Say the whole thing instead.
-    res = await pushRequest(org, app, files, null, {
-      message,
-      details,
-      title,
-      description,
-      crons: crons === undefined ? [] : crons,
-    });
+    res = await pushRequest(org, app, files, binHashes, null, meta);
     body = await res.json();
   }
   if (res.status === 422) {
@@ -664,8 +688,9 @@ async function sync(args = []) {
   const cronsChanged = writeManifestCrons(root, await fetchCrons(org, app, "syncing"));
   if (cronsChanged) console.log("✓ schedules updated in appato.json");
   const local = collectFiles(root);
-  const localSha = filesSha(local);
-  const localHashes = hashFiles(local);
+  const localBinHashes = binaryHashes(local.binary);
+  const localSha = localSetSha(local.files, localBinHashes);
+  const localHashes = { ...hashFiles(local.files), ...localBinHashes };
   const changed = manifestDiff(localHashes, man.files);
 
   if (changed.length === 0) {
@@ -682,7 +707,7 @@ async function sync(args = []) {
     const vbody = await vres.json();
     if (!vres.ok) throw new Error(vbody.error || `sync failed (${vres.status})`);
     const match = vbody.versions.find((v) => v.sha === localSha);
-    if (!match && Object.keys(local).length > 0) {
+    if (!match && Object.keys(localHashes).length > 0) {
       console.error(`✗ local files don't match any pushed version — syncing would discard changes in:`);
       for (const p of changed) console.error(`    ${p}`);
       console.error(`Push them first (appato push -m "...") or discard them: appato sync --force`);
@@ -704,11 +729,12 @@ async function sync(args = []) {
   for (const path of changed) {
     if (!(path in man.files)) unlinkSync(join(root, path));
   }
-  // Local now equals the pushed version, so filesSha of the new tree IS
+  // Local now equals the pushed version, so the set hash of the new tree IS
   // that version's sha — the same 12-hex contract every other command
   // emits. Deliberately not the manifest's sha256: they are different
   // hashes with different jobs (docs/SYNC.md S4).
-  const syncedSha = filesSha(collectFiles(root));
+  const synced = collectFiles(root);
+  const syncedSha = localSetSha(synced.files, binaryHashes(synced.binary));
   console.log(`✓ synced to v${man.version} — ${changed.length} file(s) changed`);
   console.log(`APPATO_SYNCED app=${org}/${app} version=${man.version} changed=true files=${changed.length} sha=${syncedSha}`);
 }
@@ -1029,8 +1055,12 @@ async function status(json = false) {
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
   const local = collectFiles(root);
-  const localSha = filesSha(local);
-  const changedFiles = manifestDiff(hashFiles(local), man.files);
+  const localBinHashes = binaryHashes(local.binary);
+  const localSha = localSetSha(local.files, localBinHashes);
+  const changedFiles = manifestDiff(
+    { ...hashFiles(local.files), ...localBinHashes },
+    man.files,
+  );
   const dirty = changedFiles.length > 0;
 
   // Distinguish "behind" (local equals an older pushed version — sync) from
@@ -1173,8 +1203,23 @@ async function install() {
 // ---------------------------------------------------------------------------
 // helpers
 
+/**
+ * Walk the app directory into `{files, binary}`: text files as strings,
+ * binary files as Buffers. The classification is the bytes' own shape —
+ * bytes that round-trip through UTF-8 are text (Node's decoder replaces
+ * invalid sequences with U+FFFD instead of failing, so re-encode-and-compare
+ * is the only honest test; docs/SYNC.md S16). The server enforces the same
+ * split on both wires: push refuses lone surrogates, PUT /blob refuses
+ * valid UTF-8 (B5 — a check that matters is enforced on both ends).
+ *
+ * Caps refuse, never skip. Skipping printed a warning and pushed anyway, so
+ * the deployed app silently lacked the file — and because the omission also
+ * kept it out of filesSha, `status` reported in-sync over an app that was
+ * missing it (docs/SYNC.md B7, S11).
+ */
 function collectFiles(root) {
   const files = {};
+  const binary = {};
   const walk = (dir) => {
     for (const entry of readdirSync(dir)) {
       if (IGNORE.has(entry) || entry.startsWith(".")) continue;
@@ -1184,52 +1229,33 @@ function collectFiles(root) {
         walk(full);
       } else {
         const rel = relative(root, full);
-        // Refuse, never skip. Skipping printed a warning and pushed anyway,
-        // so the deployed app silently lacked the file — and because the
-        // omission also kept it out of filesSha, `status` then reported
-        // in-sync over an app that was missing it. Same failure as reading
-        // a binary as text, in a quieter key (docs/SYNC.md B7, S11).
-        if (stats.size > MAX_FILE_BYTES) {
-          throw new Error(
-            `${rel} is ${stats.size} bytes, over the ${MAX_FILE_BYTES}-byte limit for a single file. Remove it from the app directory (or move it outside) and push again.`,
-          );
+        const bytes = readFileSync(full);
+        const text = bytes.toString("utf8");
+        if (Buffer.from(text, "utf8").equals(bytes)) {
+          if (stats.size > MAX_FILE_BYTES) {
+            throw new Error(
+              `${rel} is ${stats.size} bytes, over the ${MAX_FILE_BYTES}-byte limit for a single source file. Remove it from the app directory (or move it outside) and push again.`,
+            );
+          }
+          files[rel] = text;
+        } else {
+          if (stats.size > MAX_ASSET_BYTES) {
+            throw new Error(
+              `${rel} is ${stats.size} bytes, over the ${MAX_ASSET_BYTES}-byte limit for a single asset. Remove it from the app directory (or move it outside) and push again.`,
+            );
+          }
+          binary[rel] = bytes;
         }
-        files[rel] = readTextFile(full, rel);
       }
     }
   };
   walk(root);
-  return files;
+  return { files, binary };
 }
 
-/**
- * Read one file as text, refusing anything that isn't valid UTF-8.
- *
- * Node's decoder replaces invalid sequences with U+FFFD instead of failing,
- * so the only way to know a file really was text is to re-encode and compare
- * bytes. Without this a pushed PNG came back a different file 1.83x larger,
- * and nothing noticed: both sides hashed the same mangled string, so
- * `status` reported in-sync over a destroyed asset.
- *
- * Refuse, never skip (docs/SYNC.md S16). A skip would deploy an app that
- * silently lacks the file, and `filesSha` wouldn't include it either — so
- * `status` would still say in-sync and the omission would stay invisible.
- * That means `status` and `sync` refuse too, which is deliberate: the error
- * names the path, and a command that cheerfully reports on a tree it cannot
- * faithfully represent is the bug, not the fix.
- */
-function readTextFile(full, rel) {
-  const bytes = readFileSync(full);
-  const text = bytes.toString("utf8");
-  if (!Buffer.from(text, "utf8").equals(bytes)) {
-    throw new Error(
-      `${rel} isn't a text file. appato apps are source-only for now — images, fonts and other binary assets can't be pushed yet. Remove it from the app directory (or move it outside) and push again.`,
-    );
-  }
-  return text;
-}
-
-/** Write a {path: content} file set under root, refusing unsafe paths. */
+/** Write a {path: content} file set under root, refusing unsafe paths.
+ *  Values are strings (text) or Buffers (binary) — writeFileSync takes
+ *  both, so the two kinds converge here. */
 function writeFiles(root, files) {
   for (const [path, content] of Object.entries(files)) {
     if (path.startsWith("/") || path.split(/[\\/]/).includes("..")) {
@@ -1250,6 +1276,33 @@ function writeFiles(root, files) {
  */
 function sha256Hex(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/**
+ * Content address for one BINARY file — sha256 over raw bytes (a text
+ * file's two forms hash identically, since its bytes ARE its UTF-8).
+ * MUST stay byte-identical to sha256HexBytes() in src/hash.ts — these
+ * addresses decide which blobs need uploading before a push.
+ */
+function sha256HexBytes(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** `{path: sha256}` for the binary half of a local tree. */
+function binaryHashes(binary) {
+  const out = {};
+  for (const [path, bytes] of Object.entries(binary)) out[path] = sha256HexBytes(bytes);
+  return out;
+}
+
+/**
+ * The 12-hex set hash over BOTH halves. Binary files enter by their sha256
+ * hex as a content stand-in — the server computes the identical stand-in
+ * from its stored references (src/do/app.ts push), so neither side needs
+ * the other's bytes to agree on identity.
+ */
+function localSetSha(files, binHashes) {
+  return filesSha({ ...files, ...binHashes });
 }
 
 /**
@@ -1324,18 +1377,34 @@ async function safeManifest(org, app) {
 
 /**
  * What differs between the server's manifest and the local tree, or null if
- * there is no usable base. `files` carries only changed/added content;
- * `deleted` names paths the server has and we do not.
+ * there is no usable base. `files` carries only changed/added TEXT content;
+ * `deleted` names paths the server has and we do not (either kind — the
+ * server prunes text via this list; binary is replaced wholesale by the
+ * complete `binary` map, since a reference is ~50 bytes and needs no delta
+ * encoding). `sha256` binds BOTH halves so neither can silently drop.
  */
-function deltaAgainst(man, local) {
+function deltaAgainst(man, local, binHashes) {
   if (!man) return null;
   const localHashes = hashFiles(local);
   const changed = {};
   for (const [path, content] of Object.entries(local)) {
     if (man.files[path] !== localHashes[path]) changed[path] = content;
   }
-  const deleted = Object.keys(man.files).filter((p) => !(p in local));
-  return { base: man.version, files: changed, deleted, sha256: manifestSha(localHashes) };
+  // A path leaves `deleted` only if it is still text locally OR its base
+  // entry is exactly the binary blob we are re-referencing. A path that
+  // CHANGED KIND (text→binary) must be deleted from the base's text set,
+  // or the server reconstructs it as text AND receives a binary reference
+  // for it — both-kinds, refused. (Binary→binary unchanged matches the
+  // hash and stays out of the list; the reference re-adds it regardless.)
+  const deleted = Object.keys(man.files).filter(
+    (p) => !(p in local) && man.files[p] !== binHashes[p],
+  );
+  return {
+    base: man.version,
+    files: changed,
+    deleted,
+    sha256: manifestSha({ ...localHashes, ...binHashes }),
+  };
 }
 
 /**
@@ -1347,15 +1416,16 @@ function deltaAgainst(man, local) {
  * `delta` null means "send the whole set", which is also what an older
  * server understands: `base` absent is a full push (S5).
  */
-async function pushRequest(org, app, files, delta, meta) {
+async function pushRequest(org, app, files, binHashes, delta, meta) {
   // title/description/crons come from appato.json — the manifest is the
   // source of truth for app metadata AND schedules, synced on every push
-  // (crons replace-all: omitting one removes it). This half of the body is
-  // byte-for-byte what it has always been; the sha256 check covers files
-  // only, so a delta must never abbreviate it.
+  // (crons replace-all: omitting one removes it). `binary` is ALWAYS the
+  // complete `{path: sha256}` reference map — the bytes went up via
+  // PUT /blob before this request, so the push itself never carries them
+  // (binary never touches JSON — docs/SYNC.md S16).
   const payload = delta
-    ? { ...meta, base: delta.base, files: delta.files, deleted: delta.deleted, sha256: delta.sha256 }
-    : { ...meta, files };
+    ? { ...meta, base: delta.base, files: delta.files, deleted: delta.deleted, sha256: delta.sha256, binary: binHashes }
+    : { ...meta, files, binary: binHashes };
   const gz = gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
   return apiFetch(`/api/apps/${org}/${app}/push`, {
     method: "POST",
@@ -1374,15 +1444,43 @@ function manifestSha(files) {
   return sha256Hex(JSON.stringify(Object.fromEntries(Object.entries(files).sort())));
 }
 
-/** One file's content, addressed by hash so a push landing mid-sync can't
- *  swap the bytes we asked for. */
+/** One file's BYTES, addressed by hash so a push landing mid-sync can't
+ *  swap the bytes we asked for. Returns a Buffer for every kind of file —
+ *  downloads are bytes (docs/SYNC.md S33); text is its UTF-8. */
 async function fetchFile(org, app, path, sha256) {
   const res = await apiFetch(
     `/api/apps/${org}/${app}/file?path=${encodeURIComponent(path)}&sha256=${sha256}`,
   );
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || `could not fetch ${path} (${res.status})`);
-  return body.content;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `could not fetch ${path} (${res.status})`);
+  }
+  // Version-skew tolerance: a not-yet-propagated pre-0.7 server answers
+  // JSON `{content}`; the current wire is raw octet-stream. Without this
+  // branch, that window writes a JSON envelope into the working tree as
+  // file content.
+  if ((res.headers.get("content-type") || "").includes("application/json")) {
+    const body = await res.json();
+    return Buffer.from(body.content, "utf8");
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Upload one binary file's bytes, raw — no JSON, no base64, no gzip
+ * (assets are already-compressed formats). The server hashes what it
+ * received and answers with the address (docs/SYNC.md S22); the following
+ * push carries that address as a reference.
+ */
+async function putBlob(org, app, path, bytes) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/blob`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: bytes,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `could not upload ${path} (${res.status})`);
+  return body.sha256;
 }
 
 // Same contract as web/src/lib/time.ts ago(): the "ago" is included.
