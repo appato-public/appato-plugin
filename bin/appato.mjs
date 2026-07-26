@@ -1140,15 +1140,51 @@ function collectFiles(root) {
       const stats = statSync(full);
       if (stats.isDirectory()) {
         walk(full);
-      } else if (stats.size <= MAX_FILE_BYTES) {
-        files[relative(root, full)] = readFileSync(full, "utf8");
       } else {
-        console.error(`skipping ${relative(root, full)} (> ${MAX_FILE_BYTES} bytes)`);
+        const rel = relative(root, full);
+        // Refuse, never skip. Skipping printed a warning and pushed anyway,
+        // so the deployed app silently lacked the file — and because the
+        // omission also kept it out of filesSha, `status` then reported
+        // in-sync over an app that was missing it. Same failure as reading
+        // a binary as text, in a quieter key (docs/SYNC.md B7, S11).
+        if (stats.size > MAX_FILE_BYTES) {
+          throw new Error(
+            `${rel} is ${stats.size} bytes, over the ${MAX_FILE_BYTES}-byte limit for a single file. Remove it from the app directory (or move it outside) and push again.`,
+          );
+        }
+        files[rel] = readTextFile(full, rel);
       }
     }
   };
   walk(root);
   return files;
+}
+
+/**
+ * Read one file as text, refusing anything that isn't valid UTF-8.
+ *
+ * Node's decoder replaces invalid sequences with U+FFFD instead of failing,
+ * so the only way to know a file really was text is to re-encode and compare
+ * bytes. Without this a pushed PNG came back a different file 1.83x larger,
+ * and nothing noticed: both sides hashed the same mangled string, so
+ * `status` reported in-sync over a destroyed asset.
+ *
+ * Refuse, never skip (docs/SYNC.md S16). A skip would deploy an app that
+ * silently lacks the file, and `filesSha` wouldn't include it either — so
+ * `status` would still say in-sync and the omission would stay invisible.
+ * That means `status` and `sync` refuse too, which is deliberate: the error
+ * names the path, and a command that cheerfully reports on a tree it cannot
+ * faithfully represent is the bug, not the fix.
+ */
+function readTextFile(full, rel) {
+  const bytes = readFileSync(full);
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes)) {
+    throw new Error(
+      `${rel} isn't a text file. appato apps are source-only for now — images, fonts and other binary assets can't be pushed yet. Remove it from the app directory (or move it outside) and push again.`,
+    );
+  }
+  return text;
 }
 
 /** Write a {path: content} file set under root, refusing unsafe paths. */
