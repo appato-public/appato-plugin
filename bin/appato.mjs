@@ -198,6 +198,46 @@ BROWSER SDK — in your served HTML:
     room.presence.on((members) => ...);         // [{ user, data }]
   </script>
 
+FILES (uploads) — the SAME scopes, a second verb set, backed by R2
+  storage is for JSON <= 128KB; files are for blobs (images, PDFs, exports).
+  Every call names a scope, resolved by the platform against the identity it
+  verified — exactly like storage, so no signed or unguessable URLs.
+
+    files.shared / files.readonly / files.internal  (SERVER, ./_appato.js)
+    files.forUser(id)                               (SERVER — one person's)
+    appato.files.shared / .mine / .readonly         (BROWSER, client.js)
+
+  Verbs (keys are relative to the scope):
+    .put(key, body, { contentType }?)  -> { key, url }
+        server body: string | ArrayBuffer | Blob | ReadableStream
+        browser body: a File/Blob (contentType: file.type, else octet-stream)
+    .get(key)     -> the fetch Response, hardened headers included, or
+                     undefined if missing. Serve it straight back:
+                     return await files.internal.get(key)
+    .delete(key)
+    .list(prefix, { cursor, limit }?) -> { files: [{ key, size, contentType,
+                                          by, at }], cursor? }
+    .url(key)     -> app-relative "/_appato/files?scope=…&key=…"
+
+  url() exists ONLY where a browser could actually load the result:
+  server shared/readonly and browser shared/mine/readonly. internal and
+  forUser have NO url() — a URL can carry neither server-only nor cross-user
+  authority, so the missing method is a TypeError, not a link that leaks. A
+  browser <img src={appato.files.mine.url("avatar")}> shows each viewer their
+  OWN file (identity is resolved at the wall, not in the URL).
+
+  Every served file gets nosniff + a CSP sandbox, so even a mis-typed HTML
+  or SVG upload can't script your app. Limits: 25MB/file, ~1GB/app.
+
+  Attachments only some people may see = files.internal + your own route:
+    // index.ts — a DM attachment, visible to its two participants only
+    if (url.pathname.startsWith("/att/")) {
+      const me = requireUser(request);
+      const dm = await storage.internal.get("att/" + url.pathname.slice(5));
+      if (!dm || (me.id !== dm.from && me.id !== dm.to)) return new Response("no", { status: 403 });
+      return (await files.internal.get(dm.fileKey)) ?? new Response("gone", { status: 404 });
+    }
+
 THREE TIERS — picking the right one matters
   storage   persisted        messages, votes, rows, settings
   presence  while tab open   who's here, typing status
@@ -236,6 +276,7 @@ SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
 LIMITS (flat, per app)
   128KB/value · ~100MB total · watch <= 500 entries/prefix (paginate with
   list/SQL past that) · presence data <= 2KB · broadcast <= 32KB
+  files: 25MB/file · ~1GB/app · 1000 files/app
   schedules: plan-dependent (typically 10/app, min 1 min apart)
 
 WORKFLOW

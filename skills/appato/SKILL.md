@@ -396,6 +396,87 @@ paginate bigger data with `list`/SQL. Writes from any tab, the server, or a
 coworker's browser all fan out to every watcher in that scope — you never
 need polling, WebSocket code, reconnect handling, or a version check.
 
+## File uploads (images, PDFs, exports)
+
+`storage` holds JSON (≤128KB); **files** hold blobs — avatars, photos,
+generated PDFs, CSV exports. Files use the **same scopes as storage** and the
+same rule (the platform enforces who can reach what, using the identity it
+verified), so there are no signed or unguessable URLs to manage.
+
+| scope | who can read | who can write | reach for it when |
+|---|---|---|---|
+| `shared` | every org member | every org member | team files: a shared photo wall, uploaded docs everyone edits |
+| `mine` | just that person | just that person | one human's file: their avatar, a personal upload |
+| `readonly` | every org member | **your server only** | files your server produces for everyone to download: a generated report |
+| `internal` | **your server only** | your server only | files a browser must never load directly: attachments gated by your own check |
+
+Verbs, per scope (keys are strings, relative to the scope):
+
+- `put(key, body, { contentType }?)` → `{ key, url }`. Server body is a
+  string, ArrayBuffer, Blob, or ReadableStream; browser body is a `File`/`Blob`.
+  contentType defaults to `file.type` when the blob has one, else
+  `application/octet-stream` (which downloads as an attachment).
+- `get(key)` → the **fetch `Response` itself**, hardened headers included, or
+  `undefined` if missing — so you can serve it straight back.
+- `delete(key)`, and `list(prefix, { cursor, limit }?)` →
+  `{ files: [{ key, size, contentType, by, at }], cursor? }`.
+- `url(key)` → an app-relative path a browser can load. It exists **only where
+  a browser could actually load the result**: server `shared`/`readonly`, and
+  browser `shared`/`mine`/`readonly`. `internal` and `forUser` have no `url()`
+  — no URL can carry server-only or cross-user authority, so the method is
+  simply absent (calling it throws). A `mine` URL is the same string for
+  everyone and resolves to **each viewer's own file**.
+
+Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
+even a mis-typed HTML or SVG upload can't script your app. Limits: **25MB per
+file, ~1GB per app, 1000 files**.
+
+**Server** (`./_appato.js`):
+
+```ts
+import { files } from "./_appato.js";
+
+const { key } = await files.shared.put("logo.png", bytes, { contentType: "image/png" });
+const list = await files.shared.list("photos/");  // { files: [{ key, size, contentType, by, at }] }
+const doc = await files.forUser(user.id).get("resume.pdf");  // one person's file (no `mine` server-side)
+return await files.readonly.get("nightly-report.pdf");  // serve a server-produced file straight back
+```
+
+**Browser** (in your served HTML):
+
+```html
+<script type="module">
+  import { appato } from "/_appato/client.js";
+
+  // Upload the file the user picked; contentType defaults to file.type.
+  const file = input.files[0];
+  const { url } = await appato.files.mine.put("avatar", file);
+  img.src = url;                                  // same-origin; loads with the session cookie
+
+  // Show the team's shared photos without downloading them in JS.
+  const { files } = await appato.files.shared.list("photos/");
+  gallery.innerHTML = files.map((f) => '<img src="' + appato.files.shared.url(f.key) + '">').join("");
+</script>
+```
+
+**Attachments only some people may see** = `files.internal` + your own route.
+Store the blob in `internal` (no URL can reach it), then gate a serving route
+with your own check and hand back the Response `get` returns:
+
+```ts
+// index.ts — a DM attachment, visible to its two participants only
+if (url.pathname.startsWith("/att/")) {
+  const me = requireUser(request);
+  const dm = await storage.internal.get("att/" + url.pathname.slice(5));
+  if (!dm || (me.id !== dm.from && me.id !== dm.to)) return new Response("forbidden", { status: 403 });
+  return (await files.internal.get(dm.fileKey)) ?? new Response("gone", { status: 404 });
+}
+```
+
+The broken image a 403 produces is the point: access fails **closed and
+visibly**, and removing someone from the workspace cuts it instantly — neither
+is true of a shareable file URL.
+
 ## Scheduled jobs (reminders, digests, nightly reports)
 
 When the user wants something to happen on a schedule — "remind the team
