@@ -20,11 +20,12 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, dirname, basename } from "node:path";
+import { createInterface } from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -58,6 +59,7 @@ try {
     case "sync": await sync(args); break;
     case "history": await history(args); break;
     case "cron": case "crons": await cron(args); break;
+    case "data": await data(args); break;
     case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": await logs(args); break;
@@ -103,6 +105,23 @@ usage:
   appato cron pause|resume <name>
                             stop/restart a schedule (schedules themselves are
                             declared in appato.json)
+  appato data               what the app has stored: tables, keys per scope,
+                            people with personal data, size, live sessions
+  appato data ls [prefix] [--scope shared|readonly|internal|mine] [--user <id|email>]
+                            list a scope's keys (default shared; mine needs
+                            --user to say whose)
+  appato data get <key> [--scope ...] [--user ...]
+                            print one value as JSON
+  appato data set <key> <value|-> [--scope ...] [--user ...]
+                            write one value (JSON if it parses, else a plain
+                            string; "-" reads the value from stdin)
+  appato data rm <key> [--scope ...] [--user ...]
+                            delete one key
+  appato data sql ["<statement>"] [--write] [--json]
+                            run one SQL statement against the app's SQLite
+                            (read-only unless --write). No statement: an
+                            interactive REPL on a TTY, or one statement
+                            read from stdin otherwise
   appato rollback <version> restore a previous version's files as a new
                             version and deploy it (nothing is lost —
                             history is append-only; see appato history)
@@ -919,6 +938,346 @@ async function cron(args = []) {
 }
 
 /**
+ * The Data tool (docs/TOOLS.md "Data"): the operator view over an app's
+ * KV + SQL. Scopes are bypassed by design — the builder seat pays for it —
+ * and every mutation (and read of someone else's `mine` data) is attributed
+ * and logged to the app's timeline server-side. The APPATO_* lines are part
+ * of the machine contract (see push above).
+ */
+async function data(args = []) {
+  const { org, app } = appConfig();
+  // Positionals: only the KNOWN flags are flags — everything else is a
+  // value, including "-" (read stdin), "-1" (a negative number to set) and
+  // any other dash-leading string. Guessing from the dash would eat values.
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--write" || a === "--json") continue;
+    if (a === "--scope" || a === "--user") i++;
+    else if (a.startsWith("--")) throw new Error(`unknown flag ${a} — see: appato (usage)`);
+    else positionals.push(a);
+  }
+  const [sub, ...rest] = positionals;
+
+  if (!sub) return dataOverviewCmd(org, app);
+
+  if (sub === "sql") {
+    const write = args.includes("--write");
+    const json = args.includes("--json");
+    if (rest[0] !== undefined) return runDataSql(org, app, rest[0], write, json);
+    if (!process.stdin.isTTY) {
+      // Piped: all of stdin is ONE statement (never split on semicolons —
+      // the server takes exactly one; a trailing ; is muscle memory).
+      const piped = readFileSync(0, "utf8").trim().replace(/;$/, "");
+      if (!piped) throw new Error("no SQL statement on stdin");
+      return runDataSql(org, app, piped, write, json);
+    }
+    return dataSqlRepl(org, app);
+  }
+
+  if (!["ls", "get", "set", "rm"].includes(sub)) {
+    throw new Error(
+      `unknown data command "${sub}" — use: ls | get | set | rm | sql (bare \`appato data\` shows the overview)`,
+    );
+  }
+
+  const scope = flagValue(args, "--scope") ?? "shared";
+  if (!["shared", "mine", "readonly", "internal"].includes(scope)) {
+    throw new Error("--scope must be one of: shared, mine, readonly, internal");
+  }
+  let user = flagValue(args, "--user");
+  if (scope === "mine" && !user) {
+    throw new Error("--scope mine needs --user <id|email> — whose personal data?");
+  }
+  if (scope !== "mine" && user) {
+    throw new Error("--user only applies with --scope mine (other scopes aren't per-person)");
+  }
+  if (user && user.includes("@")) user = await resolveDataUser(org, app, user);
+
+  if (sub === "ls") return dataLs(org, app, rest[0] ?? "", scope, user);
+  const key = rest[0];
+  if (!key) {
+    throw new Error(
+      `usage: appato data ${sub} <key>${sub === "set" ? " <value|->" : ""} [--scope shared|readonly|internal|mine] [--user <id|email>]`,
+    );
+  }
+  if (sub === "get") return dataGet(org, app, key, scope, user);
+  if (sub === "rm") return dataRm(org, app, key, scope, user);
+  if (rest[1] === undefined) {
+    throw new Error('usage: appato data set <key> <value|-> — value is JSON (or a plain string); "-" reads stdin');
+  }
+  return dataSet(org, app, key, rest[1], scope, user);
+}
+
+/** GET /data — shared by the overview command, email→id resolution, and the
+ * REPL's .tables/.schema. */
+async function fetchDataOverview(org, app) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/data`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `data overview failed (${res.status})`);
+  return body;
+}
+
+/** `--user someone@co` → their id, via the overview's `mine` owner list. */
+async function resolveDataUser(org, app, email) {
+  const { users } = await fetchDataOverview(org, app);
+  const match = users.find((u) => u.email === email);
+  if (match) return match.id;
+  const known = users.map((u) => u.email).filter(Boolean);
+  throw new Error(
+    `no personal data stored for ${email}` +
+      (known.length
+        ? ` — people with data: ${known.join(", ")}`
+        : " — nobody has personal data in this app yet"),
+  );
+}
+
+async function dataOverviewCmd(org, app) {
+  const o = await fetchDataOverview(org, app);
+  console.log(`${org}/${app} data — ${formatBytes(o.dbSize)} of ${formatBytes(o.dbLimit)} used`);
+  if (o.tables.length > 0) {
+    console.log(`tables:`);
+    for (const t of o.tables) {
+      console.log(`  ${t.name}  ${t.rows} row(s)  (${t.columns.map((c) => c.name).join(", ")})`);
+    }
+  }
+  console.log(`kv keys:`);
+  console.log(`  shared    ${o.kv.shared} — every member reads + writes`);
+  console.log(`  readonly  ${o.kv.readonly} — the app's server writes; browsers only read`);
+  console.log(`  internal  ${o.kv.internal} — server-only; browsers never see it`);
+  if (o.users.length > 0) {
+    console.log(`personal (mine) data:`);
+    for (const u of o.users) {
+      console.log(`  ${u.name}${u.email ? ` <${u.email}>` : ""}  ${u.keys} key(s)`);
+    }
+  }
+  if (o.sessions.length > 0) {
+    console.log(
+      `live now: ${o.sessions.map((s) => `${s.name} (${s.sockets} tab${s.sockets === 1 ? "" : "s"})`).join(", ")}`,
+    );
+  }
+  console.log(
+    `APPATO_DATA app=${org}/${app} tables=${o.tables.length} kv_shared=${o.kv.shared} kv_readonly=${o.kv.readonly} kv_internal=${o.kv.internal} people=${o.users.length} size_bytes=${o.dbSize} sessions=${o.sessions.length}`,
+  );
+  for (const t of o.tables) {
+    console.log(
+      `APPATO_TABLE name=${t.name} rows=${t.rows} cols=${t.columns.map((c) => c.name).join(",")}`,
+    );
+  }
+}
+
+async function dataLs(org, app, prefix, scope, user) {
+  const params = new URLSearchParams({ scope });
+  if (user) params.set("user", user);
+  if (prefix) params.set("prefix", prefix);
+  const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `data ls failed (${res.status})`);
+  for (const e of body.entries) {
+    console.log(`${e.key}  ${e.by ? e.by.name : "app server"}  ${ago(e.at)}`);
+  }
+  if (body.entries.length === 0) {
+    console.log(`No keys in ${scope}${prefix ? ` under "${prefix}"` : ""}.`);
+  }
+  if (body.truncated) {
+    console.log(`… more keys exist — narrow with a prefix: appato data ls <prefix>`);
+  }
+  console.log(
+    `APPATO_KEYS app=${org}/${app} scope=${scope} user=${user ?? "none"} prefix=${JSON.stringify(prefix)} count=${body.entries.length} truncated=${body.truncated}`,
+  );
+  for (const e of body.entries) {
+    console.log(
+      `APPATO_KEY key=${JSON.stringify(e.key)} by=${JSON.stringify(e.by ? e.by.name : null)} at=${e.at}`,
+    );
+  }
+}
+
+/** There is no single-key read on the wire — the list endpoint with the key
+ * as its own prefix answers it in one call. */
+async function dataGet(org, app, key, scope, user) {
+  const params = new URLSearchParams({ scope, prefix: key });
+  if (user) params.set("user", user);
+  const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `data get failed (${res.status})`);
+  const hit = body.entries.find((e) => e.key === key);
+  if (!hit) {
+    console.error(`no key ${JSON.stringify(key)} in ${scope}`);
+    console.log(`APPATO_KV app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`);
+    process.exit(1);
+  }
+  console.log(JSON.stringify(hit.value, null, 2));
+  console.log(
+    `APPATO_KV app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=true by=${JSON.stringify(hit.by ? hit.by.name : null)} at=${hit.at}`,
+  );
+}
+
+async function dataSet(org, app, key, rawValue, scope, user) {
+  const raw = rawValue === "-" ? readFileSync(0, "utf8") : rawValue;
+  // JSON when it parses, otherwise the literal string — so both
+  // `set greeting hello` and `set config '{"x":1}'` do the obvious thing.
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    value = raw;
+  }
+  const res = await apiFetch(`/api/apps/${org}/${app}/data/kv`, {
+    method: "PUT",
+    body: JSON.stringify({ scope, ...(user ? { user } : {}), key, value }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `data set failed (${res.status})`);
+  console.log(`✓ set ${scope}:${key}`);
+  console.log(`APPATO_KV_SET app=${org}/${app} scope=${scope} key=${JSON.stringify(key)}`);
+}
+
+async function dataRm(org, app, key, scope, user) {
+  const params = new URLSearchParams({ scope, key });
+  if (user) params.set("user", user);
+  const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`, { method: "DELETE" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `data rm failed (${res.status})`);
+  console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
+  console.log(
+    `APPATO_KV_DELETED app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} existed=${body.deleted}`,
+  );
+}
+
+/** POST /data/sql — one statement. A 400 (e.g. "this statement writes —
+ * re-run with --write") throws, which is the existing error style. */
+async function postDataSql(org, app, query, write) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/data/sql`, {
+    method: "POST",
+    body: JSON.stringify({ query, write }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `sql failed (${res.status})`);
+  return body;
+}
+
+async function runDataSql(org, app, stmt, write, json) {
+  const result = await postDataSql(org, app, stmt, write);
+  if (json) {
+    console.log(JSON.stringify(result));
+  } else {
+    printSqlRows(result.rows);
+    console.log(sqlCounts(result));
+  }
+  console.log(
+    `APPATO_SQL app=${org}/${app} rows=${result.rows.length} rows_read=${result.rowsRead} rows_written=${result.rowsWritten} truncated=${result.truncated} write=${write}`,
+  );
+}
+
+/** Column-aligned rows, sqlite3-column-mode-style: NULL spelled out, cell
+ * display capped at 40 chars (the full value is one `data get` away). */
+function printSqlRows(rows) {
+  if (rows.length === 0) return;
+  const cols = Object.keys(rows[0]);
+  const cell = (v) => {
+    if (v === null || v === undefined) return "NULL";
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    return s.length > 40 ? s.slice(0, 39) + "…" : s;
+  };
+  const grid = rows.map((r) => cols.map((c) => cell(r[c])));
+  const widths = cols.map((c, i) => Math.max(c.length, ...grid.map((g) => g[i].length)));
+  console.log(cols.map((c, i) => c.padEnd(widths[i])).join("  "));
+  console.log(widths.map((w) => "-".repeat(w)).join("  "));
+  for (const g of grid) console.log(g.map((s, i) => s.padEnd(widths[i])).join("  ").trimEnd());
+}
+
+function sqlCounts(result) {
+  return `${result.rows.length} row(s) — ${result.rowsRead} read, ${result.rowsWritten} written${result.truncated ? " (truncated to 500 rows)" : ""}`;
+}
+
+/**
+ * Interactive SQL (TTY only — piped stdin is handled in data()). Statements
+ * buffer until a line ends with `;`, sqlite3-style; dot-commands are single
+ * lines and borrow sqlite3's names so muscle memory transfers. Write mode
+ * is OFF until `.write on` — errors print and the loop continues.
+ */
+async function dataSqlRepl(org, app) {
+  let write = false;
+  let buffer = "";
+  console.log(
+    `SQL on ${org}/${app} — read-only (.write on to allow writes; .help for commands; end statements with ;)`,
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const prompt = () => {
+    rl.setPrompt(buffer ? "   ...> " : `${org}/${app}> `);
+    rl.prompt();
+  };
+  prompt();
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!buffer && trimmed === "") {
+      prompt();
+      continue;
+    }
+    if (!buffer && trimmed.startsWith(".")) {
+      if (trimmed === ".quit" || trimmed === ".exit") break;
+      try {
+        write = await dataDotCommand(trimmed, org, app, write);
+      } catch (err) {
+        console.error(`error: ${err.message}`);
+      }
+      prompt();
+      continue;
+    }
+    buffer += (buffer ? "\n" : "") + line;
+    if (!buffer.trim().endsWith(";")) {
+      prompt();
+      continue;
+    }
+    const stmt = buffer.trim().replace(/;$/, "");
+    buffer = "";
+    try {
+      const result = await postDataSql(org, app, stmt, write);
+      printSqlRows(result.rows);
+      console.log(sqlCounts(result));
+    } catch (err) {
+      console.error(`error: ${err.message}`);
+    }
+    prompt();
+  }
+  rl.close();
+}
+
+/** The REPL's dot-commands (`.quit`/`.exit` are handled by the caller).
+ * Returns the write mode for subsequent statements. */
+async function dataDotCommand(cmd, org, app, write) {
+  const [name, arg] = cmd.split(/\s+/);
+  if (name === ".help") {
+    console.log(`.tables            list the app's SQL tables
+.schema [table]    show CREATE statements (all tables, or one)
+.write on|off      allow/refuse writing statements (bare .write: show mode)
+.quit / .exit      leave (Ctrl-D works too)
+Anything else is SQL — end each statement with ;`);
+  } else if (name === ".tables") {
+    const { tables } = await fetchDataOverview(org, app);
+    if (tables.length === 0) console.log("(no tables)");
+    for (const t of tables) console.log(t.name);
+  } else if (name === ".schema") {
+    const { tables } = await fetchDataOverview(org, app);
+    if (arg && !tables.some((t) => t.name === arg)) console.error(`no table "${arg}"`);
+    else if (tables.length === 0) console.log("(no tables)");
+    else for (const t of tables) if (!arg || t.name === arg) console.log(t.sql);
+  } else if (name === ".write") {
+    if (!arg) console.log(`write mode is ${write ? "on" : "off"}`);
+    else if (arg === "on") {
+      write = true;
+      console.log("⚠ write mode ON — statements now change the app's live data");
+    } else if (arg === "off") {
+      write = false;
+      console.log("write mode off");
+    } else console.error("usage: .write on|off");
+  } else {
+    console.error(`unknown command ${name} — .help lists commands`);
+  }
+  return write;
+}
+
+/**
  * Runtime logs (docs/LOGS.md L13): a bounded snapshot that EXITS — never a
  * blocking follow. One request returns error groups, the timeline slice,
  * and the summary; errors print first, stacks are never truncated (an
@@ -1542,6 +1901,14 @@ function until(msEpoch) {
   if (s < 3600) return `in ${Math.round(s / 60)}m`;
   if (s < 86400) return `in ${Math.round(s / 3600)}h`;
   return `in ${Math.round(s / 86400)}d`;
+}
+
+// Same contract as web/src/features/apps/data.ts formatBytes().
+function formatBytes(n) {
+  const f = (v, u) => `${v.toFixed(1).replace(/\.0$/, "")} ${u}`;
+  if (n >= 1024 * 1024) return f(n / 1024 / 1024, "MB");
+  if (n >= 1024) return f(n / 1024, "KB");
+  return `${n} B`;
 }
 
 /** Short local clock time (HH:MM:SS) for log lines. */

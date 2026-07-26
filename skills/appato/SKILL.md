@@ -556,6 +556,69 @@ Behavior worth knowing (don't rebuild any of it):
 - Plans cap how many schedules an app may have and how often they may run;
   a push that exceeds it fails with the limit in the error.
 
+## App data (inspecting and fixing what the app stored)
+
+`appato data` is the operator view over the app's own storage — the same KV
+and SQL the app uses, seen from outside the scope rules. Reach for it when
+you need to see what the app actually stored, fix a bad value, run a small
+one-off migration, or debug "why is the UI showing X" — look at the data
+FIRST, before adding debug endpoints or guessing. Every edit made this way
+(and every read of someone else's personal data) is attributed to the
+signed-in user and logged to the app's Logs, so coworkers can see who
+changed what — edit deliberately.
+
+- `appato data` — overview: SQL tables with row counts, key counts per
+  scope, people with personal data, storage size, live sessions.
+- `appato data ls [prefix] [--scope ...] [--user <id|email>]` — list keys.
+- `appato data get|rm <key> [--scope ...] [--user ...]` — read / delete one
+  value.
+- `appato data set <key> <value|-> [--scope ...] [--user ...]` — write one
+  value: parsed as JSON if it parses, kept as a plain string otherwise
+  (`set greeting hello` and `set config '{"x":1}'` both do the obvious
+  thing); `-` reads the value from stdin.
+- `appato data sql "<statement>" [--write] [--json]` — one SQL statement
+  against the app's private SQLite. **Read-only by default**: a statement
+  that would write (or change the schema) is refused with an error — re-run
+  with `--write` to apply. `_appato_` tables are reserved (the platform's
+  own; use the kv verbs for KV). Results cap at 500 rows
+  (`truncated=true`). **One statement per call** — never join statements
+  with semicolons. With no statement it reads one statement from stdin, or
+  opens an interactive REPL on a TTY (`.help` lists its dot-commands) — the
+  REPL is for humans; as an agent, pass the statement as the argument.
+
+`--scope` (default `shared`) names the same scopes as the storage table
+above: `shared` (team data) · `readonly` (server-computed, member-visible) ·
+`internal` (server-only) · `mine` (one person's own data). `--user
+<id|email>` says whose `mine` data — required with `--scope mine`, invalid
+with any other scope; an email resolves against the people who actually
+have data (the error lists them if it doesn't match).
+
+Machine lines:
+
+- `APPATO_DATA app=<org>/<slug> tables=<n> kv_shared=<n> kv_readonly=<n>
+  kv_internal=<n> people=<n> size_bytes=<n> sessions=<n>` followed by one
+  `APPATO_TABLE name=<table> rows=<n> cols=<comma-separated column names>`
+  per SQL table — printed by bare `appato data`.
+- `APPATO_KEYS app=<org>/<slug> scope=<scope> user=<id|none>
+  prefix=<json-string> count=<n> truncated=<true|false>` followed by one
+  `APPATO_KEY key=<json-string> by=<json-string|null> at=<ms-epoch>` per
+  key — printed by `ls`. `by=null` means the app's own server wrote it.
+  `truncated=true` means more keys exist — narrow with a prefix.
+- `APPATO_KV app=<org>/<slug> scope=<scope> key=<json-string>
+  found=<true|false> by=<json-string|null> at=<ms-epoch>` — printed by
+  `get`; the pretty-printed JSON value is everything above the line.
+  `found=false` (no `by`/`at`) exits 1.
+- `APPATO_KV_SET app=<org>/<slug> scope=<scope> key=<json-string>` — the
+  write landed.
+- `APPATO_KV_DELETED app=<org>/<slug> scope=<scope> key=<json-string>
+  existed=<true|false>` — delete is idempotent; `existed` says whether
+  anything was there.
+- `APPATO_SQL app=<org>/<slug> rows=<returned> rows_read=<n>
+  rows_written=<n> truncated=<true|false> write=<true|false>` — printed
+  after every non-REPL `appato data sql` statement (with `--json` too, after
+  the result JSON). A refused statement (e.g. a write without `--write`)
+  prints the server's error and exits 1 instead.
+
 ## Answering "where is my app?"
 
 `appato status` shows the deploy state and URL. Share the URL with the user
