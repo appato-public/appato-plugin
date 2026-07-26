@@ -60,6 +60,7 @@ try {
     case "history": await history(args); break;
     case "cron": case "crons": await cron(args); break;
     case "data": await data(args); break;
+    case "files": await files(args); break;
     case "rollback": await rollback(args); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": await logs(args); break;
@@ -122,6 +123,18 @@ usage:
                             (read-only unless --write). No statement: an
                             interactive REPL on a TTY, or one statement
                             read from stdin otherwise
+  appato files              the app's uploaded files: count + bytes per scope,
+                            people with personal files, quota used
+  appato files ls [prefix] [--scope shared|readonly|internal|mine] [--user <id|email>]
+                            list a scope's files (default shared; mine needs
+                            --user to say whose)
+  appato files get <key> [-o <path>] [--scope ...] [--user ...]
+                            download one file to <path>, or to stdout if piped
+  appato files put <path> [<key>] [--scope ...] [--user ...] [--type <mime>]
+                            upload a local file (key defaults to its basename;
+                            content type inferred from the extension)
+  appato files rm <key> [--scope ...] [--user ...]
+                            delete one file
   appato rollback <version> restore a previous version's files as a new
                             version and deploy it (nothing is lost —
                             history is append-only; see appato history)
@@ -1278,6 +1291,226 @@ Anything else is SQL — end each statement with ;`);
 }
 
 /**
+ * The Files tool (docs/FILES.md, docs/TOOLS.md "The Data tool"): the operator
+ * view over the app's uploaded blobs — the file twin of `appato data`. Scopes
+ * are bypassed the same way (the builder seat pays for it), and every upload,
+ * delete, and read of someone else's `mine` files is attributed and logged to
+ * the app's timeline server-side. The APPATO_* lines are part of the machine
+ * contract (see push above).
+ */
+async function files(args = []) {
+  const { org, app } = appConfig();
+  // Positionals: only the KNOWN flags are flags — everything else is a value
+  // (a key or a path may legitimately dash-lead). Mirrors data()'s parser.
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--scope" || a === "--user" || a === "--type" || a === "-o") i++;
+    else if (a.startsWith("--")) throw new Error(`unknown flag ${a} — see: appato (usage)`);
+    else positionals.push(a);
+  }
+  const [sub, ...rest] = positionals;
+
+  if (!sub) return filesOverviewCmd(org, app);
+
+  if (!["ls", "get", "put", "rm"].includes(sub)) {
+    throw new Error(
+      `unknown files command "${sub}" — use: ls | get | put | rm (bare \`appato files\` shows the overview)`,
+    );
+  }
+
+  const scope = flagValue(args, "--scope") ?? "shared";
+  if (!["shared", "mine", "readonly", "internal"].includes(scope)) {
+    throw new Error("--scope must be one of: shared, mine, readonly, internal");
+  }
+  let user = flagValue(args, "--user");
+  if (scope === "mine" && !user) {
+    throw new Error("--scope mine needs --user <id|email> — whose personal files?");
+  }
+  if (scope !== "mine" && user) {
+    throw new Error("--user only applies with --scope mine (other scopes aren't per-person)");
+  }
+  if (user && user.includes("@")) user = await resolveFilesUser(org, app, user);
+
+  if (sub === "ls") return filesLs(org, app, rest[0] ?? "", scope, user);
+  if (sub === "put") {
+    if (!rest[0]) {
+      throw new Error(
+        "usage: appato files put <path> [<key>] [--scope shared|readonly|internal|mine] [--user <id|email>] [--type <mime>]",
+      );
+    }
+    return filesPut(org, app, rest[0], rest[1], scope, user, flagValue(args, "--type"));
+  }
+  const key = rest[0];
+  if (!key) {
+    throw new Error(
+      `usage: appato files ${sub} <key> [--scope shared|readonly|internal|mine] [--user <id|email>]`,
+    );
+  }
+  if (sub === "get") return filesGet(org, app, key, scope, user, flagValue(args, "-o"));
+  return filesRm(org, app, key, scope, user);
+}
+
+/** GET /files — shared by the overview command and email→id resolution. */
+async function fetchFilesOverview(org, app) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/files`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `files overview failed (${res.status})`);
+  return body;
+}
+
+/** `--user someone@co` → their id, via the overview's `mine` owner list —
+ * twin of resolveDataUser (s/data/files/). */
+async function resolveFilesUser(org, app, email) {
+  const { users } = await fetchFilesOverview(org, app);
+  const match = users.find((u) => u.email === email);
+  if (match) return match.id;
+  const known = users.map((u) => u.email).filter(Boolean);
+  throw new Error(
+    `no personal files stored for ${email}` +
+      (known.length
+        ? ` — people with files: ${known.join(", ")}`
+        : " — nobody has personal files in this app yet"),
+  );
+}
+
+async function filesOverviewCmd(org, app) {
+  const o = await fetchFilesOverview(org, app);
+  console.log(`${org}/${app} files:`);
+  console.log(
+    `  shared    ${o.scopes.shared.count} file(s), ${formatBytes(o.scopes.shared.bytes)} — every member reads + writes`,
+  );
+  console.log(
+    `  readonly  ${o.scopes.readonly.count} file(s), ${formatBytes(o.scopes.readonly.bytes)} — the app's server writes; browsers only read`,
+  );
+  console.log(
+    `  internal  ${o.scopes.internal.count} file(s), ${formatBytes(o.scopes.internal.bytes)} — server-only; browsers never see it`,
+  );
+  if (o.users.length > 0) {
+    console.log(`personal (mine) files:`);
+    for (const u of o.users) {
+      console.log(
+        `  ${u.name}${u.email ? ` <${u.email}>` : ""}  ${u.count} file(s), ${formatBytes(u.bytes)}`,
+      );
+    }
+  }
+  console.log(
+    `quota: ${o.totalCount} of ${o.maxCount} files · ${formatBytes(o.totalBytes)} of ${formatBytes(o.maxBytes)}`,
+  );
+  console.log(
+    `APPATO_FILES app=${org}/${app} shared=${o.scopes.shared.count} readonly=${o.scopes.readonly.count} internal=${o.scopes.internal.count} people=${o.users.length} total=${o.totalCount} bytes=${o.totalBytes}`,
+  );
+}
+
+async function filesLs(org, app, prefix, scope, user) {
+  const params = new URLSearchParams({ scope });
+  if (user) params.set("user", user);
+  if (prefix) params.set("prefix", prefix);
+  const res = await apiFetch(`/api/apps/${org}/${app}/files/ls?${params}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `files ls failed (${res.status})`);
+  for (const f of body.files) {
+    console.log(
+      `${f.key}  ${formatBytes(f.size)}  ${f.contentType}  ${f.by ? f.by.name : "app server"}  ${f.at ? ago(f.at) : "—"}`,
+    );
+  }
+  if (body.files.length === 0) {
+    console.log(`No files in ${scope}${prefix ? ` under "${prefix}"` : ""}.`);
+  }
+  // One page, like `data ls` — a cursor means more exist; narrow with a prefix.
+  if (body.cursor) {
+    console.log(`… more files exist — narrow with a prefix: appato files ls <prefix>`);
+  }
+  console.log(
+    `APPATO_FILE_LIST app=${org}/${app} scope=${scope} user=${user ?? "none"} prefix=${JSON.stringify(prefix)} count=${body.files.length} truncated=${Boolean(body.cursor)}`,
+  );
+  for (const f of body.files) {
+    console.log(
+      // type is JSON-encoded: a content type may carry parameters with spaces
+      // ("text/plain; charset=utf-8"), which would split the key=value fields.
+      `APPATO_FILE key=${JSON.stringify(f.key)} size=${f.size} type=${JSON.stringify(f.contentType)} by=${JSON.stringify(f.by ? f.by.name : null)} at=${f.at}`,
+    );
+  }
+}
+
+async function filesGet(org, app, key, scope, user, outPath) {
+  // Dumping binary to a terminal is hostile: require -o or a pipe on a TTY.
+  if (!outPath && process.stdout.isTTY) {
+    throw new Error("won't write binary to a terminal — use -o <path> or pipe the output");
+  }
+  const params = new URLSearchParams({ scope, key });
+  if (user) params.set("user", user);
+  const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`);
+  if (res.status === 404) {
+    console.error(`no file ${JSON.stringify(key)} in ${scope}`);
+    console.log(`APPATO_FILE app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`);
+    process.exit(1);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `files get failed (${res.status})`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const type = res.headers.get("content-type") || "application/octet-stream";
+  if (outPath) writeFileSync(outPath, buf);
+  else process.stdout.write(buf);
+  // With -o the bytes are in the file, so the machine line rides stdout as
+  // usual; when the bytes are streamed to stdout it goes to STDERR instead, so
+  // a pipe (`appato files get k | …`) or redirect stays the pure file bytes.
+  (outPath ? console.log : console.error)(
+    `APPATO_FILE_SAVED app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} size=${buf.length} type=${JSON.stringify(type)} to=${outPath ? JSON.stringify(outPath) : "stdout"}`,
+  );
+}
+
+async function filesPut(org, app, path, key, scope, user, type) {
+  if (!existsSync(path)) throw new Error(`no such file: ${path}`);
+  const body = readFileSync(path);
+  const CAP = 25 * 1024 * 1024;
+  if (body.length > CAP) {
+    throw new Error(`file is ${formatBytes(body.length)} — the per-file cap is 25MB`);
+  }
+  const src = basename(path);
+  const name = key || src;
+  // A tiny, local extension→MIME map — the common uploads, nothing more. The
+  // server never trusts it (it stores whatever content-type it's handed); it's
+  // only so `put logo.png` does the obvious thing without a --type flag.
+  const types = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+    webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf",
+    txt: "text/plain", md: "text/markdown", json: "application/json",
+    csv: "text/csv", html: "text/html", css: "text/css", js: "text/javascript",
+    mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", wav: "audio/wav",
+  };
+  const ext = src.includes(".") ? src.slice(src.lastIndexOf(".") + 1).toLowerCase() : "";
+  const contentType = type || types[ext] || "application/octet-stream";
+  const params = new URLSearchParams({ scope, key: name });
+  if (user) params.set("user", user);
+  const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body,
+  });
+  const resBody = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(resBody.error || `files put failed (${res.status})`);
+  console.log(`✓ uploaded ${scope}:${name} (${formatBytes(body.length)})`);
+  console.log(
+    `APPATO_FILE_PUT app=${org}/${app} scope=${scope} key=${JSON.stringify(name)} size=${body.length} type=${JSON.stringify(contentType)}`,
+  );
+}
+
+async function filesRm(org, app, key, scope, user) {
+  const params = new URLSearchParams({ scope, key });
+  if (user) params.set("user", user);
+  const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`, { method: "DELETE" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `files rm failed (${res.status})`);
+  console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
+  console.log(
+    `APPATO_FILE_DELETED app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} existed=${body.deleted}`,
+  );
+}
+
+/**
  * Runtime logs (docs/LOGS.md L13): a bounded snapshot that EXITS — never a
  * blocking follow. One request returns error groups, the timeline slice,
  * and the summary; errors print first, stacks are never truncated (an
@@ -1906,6 +2139,7 @@ function until(msEpoch) {
 // Same contract as web/src/features/apps/data.ts formatBytes().
 function formatBytes(n) {
   const f = (v, u) => `${v.toFixed(1).replace(/\.0$/, "")} ${u}`;
+  if (n >= 1024 * 1024 * 1024) return f(n / 1024 / 1024 / 1024, "GB");
   if (n >= 1024 * 1024) return f(n / 1024 / 1024, "MB");
   if (n >= 1024) return f(n / 1024, "KB");
   return `${n} B`;

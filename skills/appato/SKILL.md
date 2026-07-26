@@ -619,6 +619,54 @@ Machine lines:
   the result JSON). A refused statement (e.g. a write without `--write`)
   prints the server's error and exits 1 instead.
 
+## App files (inspecting an app's uploads)
+
+`appato files` is the file twin of `appato data` — the operator view over the
+app's uploaded blobs (images, PDFs, exports), the same R2-backed file plane
+the app's SDK uses, seen from outside the scope rules. Reach for it to see
+what the app actually stored, download a file to check it, replace a bad
+upload, or clear one out. Like the data tool, reads and writes need a builder
+seat, and every upload, delete, and read of someone else's personal (`mine`)
+files is attributed to the signed-in user and logged to the app's Logs.
+
+- `appato files` — overview: file count + bytes per scope, people with
+  personal files, quota used.
+- `appato files ls [prefix] [--scope ...] [--user <id|email>]` — list files.
+- `appato files get <key> [-o <path>] [--scope ...] [--user ...]` — download
+  one file to `<path>` (or to stdout when piped; a bare TTY without `-o` is
+  refused — binary would garble the terminal).
+- `appato files put <path> [<key>] [--scope ...] [--user ...] [--type <mime>]`
+  — upload a local file. Key defaults to the file's basename; content type is
+  inferred from the extension unless `--type` says otherwise. Per-file cap 25MB.
+- `appato files rm <key> [--scope ...] [--user ...]` — delete one file.
+
+`--scope` and `--user` mean exactly what they do for `appato data` (default
+`shared`; `mine` needs `--user`, invalid elsewhere; an email resolves against
+the people who actually have files).
+
+Machine lines:
+
+- `APPATO_FILES app=<org>/<slug> shared=<n> readonly=<n> internal=<n>
+  people=<n> total=<n> bytes=<n>` — printed by bare `appato files`.
+- `APPATO_FILE_LIST app=<org>/<slug> scope=<scope> user=<id|none>
+  prefix=<json-string> count=<n> truncated=<true|false>` followed by one
+  `APPATO_FILE key=<json-string> size=<n> type=<json-string> by=<json-string|null>
+  at=<ms-epoch>` per file — printed by `ls`. `by=null` means the app's own
+  server wrote it. `truncated=true` means more files exist — narrow with a
+  prefix.
+- `APPATO_FILE app=<org>/<slug> scope=<scope> key=<json-string> found=false`
+  — printed by `get` on a miss (exits 1).
+- `APPATO_FILE_SAVED app=<org>/<slug> scope=<scope> key=<json-string>
+  size=<n> type=<json-string> to=<json-string|stdout>` — printed by `get` on
+  success; `to` is the output path, or `stdout` when piped. With `-o` this
+  line is on stdout; when the bytes stream to stdout it's on **stderr**
+  instead, so the piped file bytes stay clean.
+- `APPATO_FILE_PUT app=<org>/<slug> scope=<scope> key=<json-string> size=<n>
+  type=<json-string>` — the upload landed.
+- `APPATO_FILE_DELETED app=<org>/<slug> scope=<scope> key=<json-string>
+  existed=<true|false>` — delete is idempotent; `existed` says whether
+  anything was there.
+
 ## Answering "where is my app?"
 
 `appato status` shows the deploy state and URL. Share the URL with the user
