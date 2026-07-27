@@ -329,9 +329,9 @@ const drafts = await storage.forUser(user.id).list("drafts/");
 ```
 
 Keys are plain strings, relative to their scope; use `/`-separated prefixes
-as collections (`messages/`, `votes/`). Values are JSON (≤128KB each;
-~100MB per app). Nothing is reserved — the same key in two scopes is two
-different values.
+as collections (`messages/`, `votes/`). Values are JSON (≤128KB each; ~100MB
+per app on the default plan — the store cap is plan-dependent). Nothing is
+reserved — the same key in two scopes is two different values.
 
 **SQL** for structured data (reports, joins, aggregates) — the app's own
 private SQLite. **Server-side only**: call it in your fetch handler and
@@ -401,9 +401,13 @@ settings** = `mine.set` + `mine.watch` · **cursors / typing** = `channel`
 broadcast only.
 
 `watch` is for prefixes with ≤500 entries (it delivers a full snapshot);
-paginate bigger data with `list`/SQL. Writes from any tab, the server, or a
-coworker's browser all fan out to every watcher in that scope — you never
-need polling, WebSocket code, reconnect handling, or a version check.
+paginate bigger data with `list`/SQL. **Design keys so a watched prefix stays
+under 500** — shard by date, room, or owner (`messages/2026-07/…`,
+`room/<id>/…`) rather than one flat `messages/` that grows without bound; a
+snapshot clipped at 500 warns in the browser console but silently shows a
+partial view. Writes from any tab, the server, or a coworker's browser all fan
+out to every watcher in that scope — you never need polling, WebSocket code,
+reconnect handling, or a version check.
 
 ## File uploads (images, PDFs, exports)
 
@@ -437,8 +441,8 @@ Verbs, per scope (keys are strings, relative to the scope):
   everyone and resolves to **each viewer's own file**.
 
 Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
-even a mis-typed HTML or SVG upload can't script your app. Limits: **25MB per
-file, ~1GB per app, 1000 files**.
+even a mis-typed HTML or SVG upload can't script your app. Limits (default
+plan, plan-dependent): **25MB per file, ~1GB per app, 1000 files**.
 
 **Server** (`./_appato.js`):
 

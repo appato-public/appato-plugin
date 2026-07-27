@@ -41,9 +41,11 @@ const IGNORE = new Set([
   "appato.json",
   "_appato.d.ts",
 ]);
-const MAX_FILE_BYTES = 512 * 1024;
-// Server-enforced too (PlanLimits.maxAssetBytes, the source of truth —
-// Cloudflare's 25 MiB per-asset serving ceiling). Refuse, never skip.
+// Cloudflare's real 25 MiB per-asset serving CEILING — a platform constant,
+// so the client may pre-check it (unlike a plan knob, which the server owns:
+// a client literal would wrongly block a plan with a higher limit). The
+// per-source-file size limit is a plan knob (PlanLimits.maxFileBytes), so the
+// server's reject at push is the only enforcement. Refuse, never skip.
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 
 const [, , command, ...args] = process.argv;
@@ -305,10 +307,11 @@ SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
   fire) and missed fires are skipped, never backfilled.
   Test without waiting: appato cron run <name> · appato cron (list/status)
 
-LIMITS (flat, per app)
-  128KB/value · ~100MB total · watch <= 500 entries/prefix (paginate with
-  list/SQL past that) · presence data <= 2KB · broadcast <= 32KB
-  files: 25MB/file · ~1GB/app · 1000 files/app
+LIMITS (per app; storage sizes are plan-dependent)
+  128KB/value · 100MB total on the default plan — plan-dependent · watch
+  <= 500 entries/prefix (paginate with list/SQL past that) · presence data
+  <= 2KB · broadcast <= 32KB
+  files (default plan): 25MB/file · ~1GB/app · 1000 files/app
   schedules: plan-dependent (typically 10/app, min 1 min apart)
 
 WORKFLOW
@@ -1865,11 +1868,9 @@ function collectFiles(root) {
         const bytes = readFileSync(full);
         const text = bytes.toString("utf8");
         if (Buffer.from(text, "utf8").equals(bytes)) {
-          if (stats.size > MAX_FILE_BYTES) {
-            throw new Error(
-              `${rel} is ${stats.size} bytes, over the ${MAX_FILE_BYTES}-byte limit for a single source file. Remove it from the app directory (or move it outside) and push again.`,
-            );
-          }
+          // No client-side per-source-file cap: that limit is a plan knob
+          // (PlanLimits.maxFileBytes) the server enforces at push (src/build.ts),
+          // and a client literal would wrongly block a plan with a higher one.
           files[rel] = text;
         } else {
           if (stats.size > MAX_ASSET_BYTES) {
