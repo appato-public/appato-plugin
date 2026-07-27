@@ -80,7 +80,8 @@ below the current directory. You never need to be in a special directory.
    "PTO tracker" → `pto-tracker`); lowercase letters/digits/single hyphens
    only. Check the `status` list first so the name is
    distinct from existing apps. Then run:
-   `appato create <slug> --title "PTO Tracker" --description "..."`.
+   `appato create <slug> --title "PTO Tracker" --description "..."
+   --emoji "🌴" --label "PTO"`.
    This creates the `./<slug>/` directory itself — cd in afterward. If the
    slug is taken, the error lists similar existing apps — pick a more
    specific slug informed by that list (e.g. `eng-pto-tracker`), never a
@@ -89,6 +90,17 @@ below the current directory. You never need to be in a special directory.
    The title is the human name shown in the workspace; the description is
    1–2 sentences on what the app does and who it's for — write both for the
    user's coworkers, who will discover the app with no other context.
+   **Always pass `--emoji` and `--label`** — they design the app's icon (no
+   AI is involved; a good pick is on you):
+   - `--emoji`: the single emoji that best captures the tool (`"🌴"`,
+     `"📊"`, `"🧾"`). Pass a *pair* in one string (`--emoji "📦🚚"`) only
+     when one emoji genuinely can't — the two render overlapped. One is
+     almost always better.
+   - `--label`: one punchy word, ≤ 8 characters, shown under the emoji at
+     larger sizes (`"PTO"`, `"Stock"`, `"Rota"`). UTF-8/localized labels are
+     fine (counted in graphemes, so 8 CJK characters are legal). Omit it
+     only when the emoji alone is clearer than any word.
+   Both are overridable later by anyone in the console's icon editor.
    The manifest, `appato.json`:
    - `org` and `app` are the app's identity — never change or delete them.
    - `title` and `description` are yours to maintain: when the app's
@@ -272,6 +284,15 @@ above them.
   call external databases unless the user provides one.
 - The `/_appato/*` URL path is reserved by the platform — your fetch handler
   never sees it; don't route on it.
+- **The app's icon is served for you** — the one you set with `--emoji` /
+  `--label` at create (editable in the console). The platform answers
+  `/favicon.ico` and `/apple-touch-icon.png` automatically for every app, so a
+  browser tab and an iOS home-screen bookmark already show the right icon with
+  zero markup. Ladder PNGs live at reserved paths too: `/_appato/icon-192.png`
+  and `/_appato/icon-512.png` (also 16/32/48/180/256). If you add a PWA
+  `manifest.json`, point its `icons` at those. You don't need `<link
+  rel="icon">` tags, but adding them (e.g. `<link rel="icon" sizes="any"
+  href="/favicon.ico">`) is harmless and lets a browser pick a specific size.
 - Keep apps small and single-purpose. Prefer one screen that does the job
   over navigation and settings pages.
 - **The URL is part of the UI.** When the app does have distinct views —

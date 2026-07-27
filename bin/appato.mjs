@@ -93,7 +93,9 @@ usage:
                             elsewhere: list your apps + local checkouts
                             (--all: every app in the org)
   appato create <slug> --title "..." --description "..."  [--org <slug>]
+                            [--emoji "📦"] [--label "Stock"]
                             create an app in a new ./<slug>/ directory
+                            (--emoji: 1–2 emoji · --label: ≤8-char icon label)
   appato clone <slug> [dir] [--org <slug>] [--version <n>]
                             check out an existing app into ./<slug>/
                             (--version checks out that past version's files
@@ -628,8 +630,37 @@ async function create(args) {
   const org = flagValue(args, "--org");
   if (!slug || !title || !description) {
     throw new Error(
-      'usage: appato create <slug> --title "Human Title" --description "One or two sentences: what the app does and who it\'s for" [--org <org>]',
+      'usage: appato create <slug> --title "Human Title" --description "One or two sentences: what the app does and who it\'s for" [--emoji "📦"] [--label "Stock"] [--org <org>]',
     );
+  }
+  // Icon ingredients (docs/ICONS.md v3): --emoji takes 1–2 emoji in one string
+  // (grapheme-split → emoji + optional secondEmoji); --label is one punchy
+  // word. The server truncates the label authoritatively (≤8 graphemes), so
+  // the CLI only warns there — but a NON-emoji --emoji must fail here: the
+  // server deliberately swallows a bad icon (creation must not fail over
+  // cosmetics) and 201s with the placeholder, so passing it through would
+  // LOOK like success. This also catches a missing value, where flagValue
+  // consumes the next flag.
+  const emojiArg = flagValue(args, "--emoji");
+  const label = flagValue(args, "--label");
+  // Twin: graphemes in web/src/features/apps/IconEditor.tsx.
+  const graphemes = (s) =>
+    [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].map((g) => g.segment);
+  // Twin: isEmoji ↔ src/icons.ts (keycaps carry no pictographic property).
+  const isEmoji = (s) =>
+    /^[0-9#*]️?⃣$/.test(s) ||
+    /\p{Extended_Pictographic}|\p{Emoji_Presentation}/u.test(s);
+  let emoji, secondEmoji;
+  if (emojiArg) {
+    const parts = graphemes(emojiArg.trim());
+    if (parts.length < 1 || parts.length > 2 || !parts.every(isEmoji)) {
+      throw new Error(`--emoji must be one or two emoji, got ${JSON.stringify(emojiArg)}`);
+    }
+    emoji = parts[0];
+    secondEmoji = parts[1];
+  }
+  if (label && graphemes(label).length > 8) {
+    console.error(`! --label is ${graphemes(label).length} graphemes; the server truncates to 8`);
   }
   const inside = findAppRoot();
   if (inside) {
@@ -645,7 +676,12 @@ async function create(args) {
   }
   const res = await apiFetch("/api/apps", {
     method: "POST",
-    body: JSON.stringify({ slug, org, title, description }),
+    body: JSON.stringify({
+      slug, org, title, description,
+      ...(emoji ? { emoji } : {}),
+      ...(secondEmoji ? { secondEmoji } : {}),
+      ...(label ? { label } : {}),
+    }),
   });
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || `create failed (${res.status})`);
