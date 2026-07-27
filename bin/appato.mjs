@@ -65,6 +65,11 @@ try {
     case "data": await data(args); break;
     case "files": await files(args); break;
     case "rollback": await rollback(args); break;
+    case "pause": await pause(); break;
+    case "resume": await resume(); break;
+    case "trash": await trash(); break;
+    case "restore": await restore(); break;
+    case "delete": await deleteForever(args); break;
     case "status": await status(args.includes("--json")); break;
     case "logs": await logs(args); break;
     case "sdk": case "howto": case "docs": sdkHelp(); break;
@@ -150,6 +155,18 @@ usage:
   appato rollback <version> restore a previous version's files as a new
                             version and deploy it (nothing is lost —
                             history is append-only; see appato history)
+  appato pause              take the app offline (maintenance): stops serving,
+                            suspends schedules, freezes data — but keeps
+                            everything, readable, and fully reversible
+  appato resume             bring a paused app back: redeploy the last version
+                            and unfreeze
+  appato trash              move the app to the trash: offline + frozen, on a
+                            countdown to permanent deletion (restorable until)
+  appato restore            bring a trashed app back to active, exactly as it was
+  appato delete <slug> --force [--org <org>]
+                            permanently delete a TRASHED app and everything
+                            behind it (code, data, files, logs). Irreversible;
+                            refuses without --force
   appato sdk                how to build apps: platform APIs (storage,
                             realtime, identity), conventions, recipes
   appato logs [--all] [--since <2h|30m|7d>] [-n <count>] [--errors]
@@ -1118,6 +1135,102 @@ async function rollback(args = []) {
   console.log(`APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`);
 }
 
+/**
+ * Pause an app: take it offline (dispatch script removed, all versions and
+ * data kept but frozen) — docs/LIFECYCLE.md. Reversible with `appato resume`.
+ * Slug resolution is the same as push (the local appato.json's org/app).
+ */
+async function pause() {
+  const { org, app } = appConfig();
+  const res = await apiFetch(`/api/apps/${org}/${app}/pause`, { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `pause failed (${res.status})`);
+  console.log(`✓ paused ${org}/${app} — offline, data frozen. Resume with: appato resume`);
+  console.log(`APPATO_PAUSED app=${org}/${app}`);
+}
+
+/** Resume a paused app: redeploy the last deployed version and unfreeze. */
+async function resume() {
+  const { org, app } = appConfig();
+  const res = await apiFetch(`/api/apps/${org}/${app}/resume`, { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `resume failed (${res.status})`);
+  // The API answers 200 with the redeploy's outcome in the body: a failed
+  // redeploy means the app is active but still offline (no script, schedules
+  // suspended) — that is not a resume, so no APPATO_RESUMED.
+  if (body.deployStatus === "error") {
+    throw new Error(
+      `resume failed: the redeploy errored and ${org}/${app} is still offline. Fix and \`appato push\`, or retry \`appato resume\`.`,
+    );
+  }
+  console.log(`✓ resumed ${org}/${app} → ${body.url ?? ""}`);
+  console.log(`APPATO_RESUMED app=${org}/${app} url=${body.url ?? "none"}`);
+}
+
+/**
+ * Move an app to the trash (docs/LIFECYCLE.md D3): offline + frozen like pause,
+ * but on a countdown to permanent deletion — restorable with `appato restore`
+ * until then. Slug resolution is the same as push (the local appato.json).
+ */
+async function trash() {
+  const { org, app } = appConfig();
+  const res = await apiFetch(`/api/apps/${org}/${app}/trash`, { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `trash failed (${res.status})`);
+  console.log(`✓ moved ${org}/${app} to the trash — offline, frozen. Restore with: appato restore`);
+  console.log(`APPATO_TRASHED app=${org}/${app} deletes_at=${body.deletesAt ?? "none"}`);
+}
+
+/** Restore a trashed app: back to active, redeploying the last version (D12). */
+async function restore() {
+  const { org, app } = appConfig();
+  const res = await apiFetch(`/api/apps/${org}/${app}/restore`, { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `restore failed (${res.status})`);
+  // A failed redeploy leaves the app active-but-offline (same shape as resume) —
+  // that is not a clean restore, so no APPATO_RESTORED.
+  if (body.deployStatus === "error") {
+    throw new Error(
+      `restore failed: the redeploy errored and ${org}/${app} is active but still offline. Fix and \`appato push\`.`,
+    );
+  }
+  console.log(`✓ restored ${org}/${app} → ${body.url ?? ""}`);
+  console.log(`APPATO_RESTORED app=${org}/${app} url=${body.url ?? "none"}`);
+}
+
+/**
+ * Delete a trashed app forever (docs/LIFECYCLE.md D5) — irreversible, so it
+ * REFUSES without `--force` (no interactive prompt: the agent runs
+ * non-interactively). Takes an explicit slug because a corpse has no local
+ * checkout; `--org` picks the workspace (default: your first).
+ */
+async function deleteForever(args = []) {
+  // Positionals skip each option AND its value, exactly like create(): a bare
+  // `args.find(a => !a.startsWith("-"))` picked the FIRST non-dash token, so
+  // `appato delete --org acme tracker --force` selected "acme" (the --org
+  // VALUE) as the slug — a wrong-target on an irreversible command.
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith("-")) i++; // skip flag and its value
+    else positionals.push(args[i]);
+  }
+  const slug = positionals[0];
+  if (!slug) {
+    throw new Error("usage: appato delete <slug> --force [--org <org>]");
+  }
+  if (!args.includes("--force")) {
+    throw new Error(
+      `refusing to delete "${slug}" forever without --force. This destroys all code, data, files, and logs and cannot be undone. Re-run with: appato delete ${slug} --force`,
+    );
+  }
+  const org = flagValue(args, "--org") || (await defaultOrg());
+  const res = await apiFetch(`/api/apps/${org}/${slug}`, { method: "DELETE" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `delete failed (${res.status})`);
+  console.log(`✓ deleted ${org}/${slug} forever`);
+  console.log(`APPATO_DELETED app=${org}/${slug}`);
+}
+
 async function history(args = []) {
   const json = args.includes("--json");
   const all = args.includes("--all");
@@ -1211,7 +1324,7 @@ async function cron(args = []) {
     console.log(`  "crons": [{ "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }]`);
     console.log(`Your app handles POST /cron/<name> (see: appato sdk).`);
   } else {
-    if (body.suspended) console.log(`⚠ app is archived — no schedule runs until it's live again`);
+    if (body.suspended) console.log(`⚠ app is paused — no schedule runs until it's resumed`);
     for (const c of body.crons) {
       const when = c.paused
         ? c.pausedBy === "auto"
@@ -2011,8 +2124,18 @@ async function status(json = false) {
   }
   console.log(`app:      ${out.app}`);
   console.log(`url:      ${out.url}`);
-  if (body.archived) {
-    console.log(`status:   archived — not serving; the app's owner can make it live again in the console`);
+  if (body.status === "paused") {
+    console.log(`status:   paused — not serving, data frozen; resume it with: appato resume`);
+  } else if (body.status === "trashed") {
+    // A trashed checkout is offline like a paused one, but on a countdown to
+    // permanent deletion — say so, and never let the stale deploy status read
+    // as if it were serving (docs/LIFECYCLE.md).
+    const days = body.deletesAt
+      ? Math.max(0, Math.ceil((body.deletesAt - Date.now()) / 86_400_000))
+      : null;
+    const countdown =
+      days === null ? "" : ` — deletes forever in ${days} day${days === 1 ? "" : "s"}`;
+    console.log(`status:   in trash — not serving${countdown}; restore it with: appato restore`);
   } else {
     console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
   }
@@ -2024,7 +2147,7 @@ async function status(json = false) {
   } else {
     console.log(`local:    ⚠ ${changedFiles.length} file(s) with unpushed changes — run: appato push`);
   }
-  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} archived=${body.archived ?? false} sha=${out.localSha} url=${out.url}`);
+  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} status=${body.status ?? "active"} deletes_at=${body.deletesAt ?? "none"} sha=${out.localSha} url=${out.url}`);
 }
 
 /**
@@ -2040,7 +2163,7 @@ async function workspaceStatus(json = false, all = false) {
   const localByApp = new Map(local.map((c) => [`${c.org}/${c.app}`, c.dir]));
   const apps = body.apps.map((a) => ({
     slug: a.slug,
-    title: a.name + (a.status === "archived" ? "  [archived]" : ""),
+    title: a.name + (a.status === "paused" ? "  [paused]" : ""),
     dir: localByApp.get(`${body.org}/${a.slug}`) ?? null,
   }));
   // Checkouts of apps outside the fetched list (e.g. a coworker's app you
@@ -2273,7 +2396,7 @@ async function fetchManifest(org, app) {
  * has no versions, a network blip has no manifest, and neither is a reason
  * to refuse someone's work; both just mean the push carries the full set,
  * which is what it always used to do. Real problems (no such app, no seat,
- * archived) surface from the push itself, which is the request that
+ * paused) surface from the push itself, which is the request that
  * actually knows.
  *
  * Note this is the opposite call from sync, where a missing manifest was

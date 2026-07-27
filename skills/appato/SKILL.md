@@ -87,6 +87,11 @@ below the current directory. You never need to be in a special directory.
    specific slug informed by that list (e.g. `eng-pto-tracker`), never a
    numbered suffix. If it's unclear whether a similar app already covers
    the need, check `appato status --all` before creating a duplicate.
+   A `code=slug_in_trash` error is DIFFERENT: that exact slug is in the
+   trash and its name is held until its data is gone. Don't rename around
+   it — surface the choice to the user: restore the trashed app
+   (`appato restore` from its checkout) or delete it forever
+   (`appato delete <slug> --force`), then retry create.
    The title is the human name shown in the workspace; the description is
    1–2 sentences on what the app does and who it's for — write both for the
    user's coworkers, who will discover the app with no other context.
@@ -179,12 +184,26 @@ above them.
   version — run `appato sync` before any further edits.
 - `APPATO_STATUS app=<org>/<slug> deployed_version=<n|none>
   deployed_at=<ms-epoch|never> dirty=<true|false>
-  state=<in_sync|behind|modified> archived=<true|false> sha=<12-hex>
+  state=<in_sync|behind|modified> status=<active|paused|trashed> sha=<12-hex>
   url=<url>` — `behind` means run `appato sync`; `modified` means unpushed
-  local changes — push. `archived=true` means the app is offline by its
-  owner's choice: pushes are refused; don't try to work around it — tell
-  the user its owner can make it live again from the app's page in the
-  console.
+  local changes — push. `status=paused` means the app is offline
+  (maintenance): every mutation — push, data write, file write, schedule
+  run — is refused with 409. Resume it with `appato resume` (or tell the
+  user to resume it from the app's page in the console), then push.
+- `APPATO_PAUSED app=<org>/<slug>` — the app is now paused: offline,
+  schedules suspended, data frozen but readable. Fully reversible.
+- `APPATO_RESUMED app=<org>/<slug> url=<url|none>` — a paused app is active
+  again; the last deployed version is redeploying at `url`.
+- `APPATO_TRASHED app=<org>/<slug> deletes_at=<ms-epoch|none>` — printed by
+  `appato trash`: the app is offline and frozen (like pause) but on a
+  countdown to PERMANENT deletion at `deletes_at`. Restore it any time
+  before then with `appato restore`. `status=trashed` in `appato status`.
+- `APPATO_RESTORED app=<org>/<slug> url=<url|none>` — a trashed app is
+  active again; the last deployed version is redeploying at `url`.
+- `APPATO_DELETED app=<org>/<slug>` — printed by `appato delete <slug>
+  --force`: the app and everything behind it (code, data, files, logs) are
+  permanently gone and the slug is freed. Irreversible. `delete` refuses
+  without `--force`, and only works on an app already in the trash.
 - `APPATO_WORKSPACE org=<org> scope=<mine|all> apps=<n> checked_out=<n>`
   followed by one `APPATO_APP app=<org>/<slug> dir=<"./dir"|none>` per app
   — printed by `status` when outside any app directory. `scope=mine` means
@@ -220,7 +239,7 @@ above them.
   per schedule. `paused_by=auto` means the platform stopped it after
   repeated failures — fix the handler, push, then
   `appato cron resume <name>`. `missed` is NOT a failure and needs no fix:
-  the app was archived, so those fires never happened and are never
+  the app was paused, so those fires never happened and are never
   replayed.
 - `APPATO_CRON_RUN app=<org>/<slug> name=<name>
   status=<ok|error|timeout|skipped> http=<code|none> duration_ms=<n>
@@ -591,8 +610,8 @@ Behavior worth knowing (don't rebuild any of it):
   — fix the handler, push, then `appato cron resume <name>`.
 - Runs never overlap: if one is still going when the next fire is due, that
   fire is skipped.
-- Missed fires (platform downtime, archived app) are skipped, never
-  replayed in a burst. Unarchiving records one `missed` entry covering the
+- Missed fires (platform downtime, paused app) are skipped, never
+  replayed in a burst. Resuming records one `missed` entry covering the
   whole gap so the history explains itself — that entry is a note, not an
   error, and doesn't count toward the auto-pause.
 - Pausing/resuming lives in the console and CLI, not the manifest — a push
