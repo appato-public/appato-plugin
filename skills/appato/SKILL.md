@@ -93,7 +93,10 @@ below the current directory. You never need to be in a special directory.
    - `org` and `app` are the app's identity — never change or delete them.
    - `title` and `description` are yours to maintain: when the app's
      purpose or scope changes, update them in `appato.json` like any other
-     file. Every push syncs them to the platform.
+     file. Every push syncs them to the platform — but they can also be
+     edited in the console, so `appato sync` pulls title/description (and
+     crons) back down from the platform. Don't be surprised if `sync`
+     rewrites them; never edit `org`/`app`.
    - `crons` (optional) declares the app's schedules — see "Scheduled jobs"
      below. Every push syncs the whole array, so removing an entry removes
      the schedule.

@@ -25,7 +25,7 @@ import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 const CRED_DIR = join(homedir(), ".appato");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -534,16 +534,35 @@ async function findVersionBySha(org, app, sha) {
   return null;
 }
 
-/** Rewrite appato.json's `crons` in place -> true if it changed. */
-function writeManifestCrons(root, crons) {
+/**
+ * Rewrite appato.json's server-owned fields — `title`, `description`, and
+ * `crons` — in place, preserving every other key (org, app, …). Returns true
+ * if anything changed. All three are owned by the platform: title/description
+ * may have been edited in the console, and crons ride the version and are
+ * pushed replace-all — so a stale local value would be stated back over the
+ * real one on the next push. `crons` follows the same rule as before: the key
+ * is deleted when the set is empty.
+ */
+function writeManifestMeta(root, { title, description, crons }) {
   const path = join(root, "appato.json");
   const manifest = JSON.parse(readFileSync(path, "utf8"));
-  const before = JSON.stringify(manifest.crons ?? []);
+  const before = JSON.stringify(manifest);
+  if (title !== undefined) manifest.title = title;
+  if (description !== undefined) manifest.description = description;
   if (crons.length === 0) delete manifest.crons;
   else manifest.crons = crons;
-  if (JSON.stringify(manifest.crons ?? []) === before) return false;
+  if (JSON.stringify(manifest) === before) return false;
   writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
   return true;
+}
+
+/** The app's registry + deploy state (GET /api/apps/{org}/{app}) — carries the
+ * server-owned title/description that sync refreshes into appato.json. */
+async function fetchAppState(org, app) {
+  const res = await apiFetch(`/api/apps/${org}/${app}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `couldn't read ${org}/${app} (${res.status})`);
+  return body;
 }
 
 /** Nearest ancestor directory (including cwd) containing appato.json. */
@@ -843,6 +862,12 @@ async function show(args = []) {
     console.log(`  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`);
     console.log(`  ${composition(s, body.files)}`);
   }
+  // The version's own schedules (docs/CRON.md C1) — null/empty prints nothing.
+  if (body.crons?.length) {
+    for (const c of body.crons) {
+      console.log(`  schedule: ${c.name}  ${c.schedule}${c.tz ? ` ${c.tz}` : ""}`);
+    }
+  }
   for (const f of body.files) {
     console.log(`${f.path}  ${formatBytes(f.bytes)}${f.binary ? "  [binary]" : ""}`);
   }
@@ -942,19 +967,43 @@ async function push(args = []) {
 }
 
 async function sync(args = []) {
-  const { org, app, root } = appConfig();
+  const {
+    org,
+    app,
+    root,
+    title: localTitle,
+    description: localDescription,
+    crons: localCrons,
+  } = appConfig();
   const force = args.includes("--force");
   // The manifest, not the files: {path: sha256} is a few hundred bytes
   // against the whole app, and it is enough to decide everything below.
   // Content is fetched per differing path, addressed by hash so a push
   // landing mid-sync cannot swap the bytes underneath us.
   const man = await fetchManifest(org, app);
-  // Schedules live in appato.json, which is excluded from the file hashes —
-  // so without this a sync could report "up to date" while the manifest
-  // held stale schedules, and the next push would restore them over the
-  // real ones. Refresh them first, whatever the file comparison decides.
-  const cronsChanged = writeManifestCrons(root, await fetchCrons(org, app, "syncing"));
-  if (cronsChanged) console.log("✓ schedules updated in appato.json");
+  // Refresh every server-owned appato.json field (title, description,
+  // schedules) BEFORE the file comparison and regardless of its outcome.
+  // None of these ride the file hashes: title/description live in the
+  // registry (and may have been edited in the console), and schedules ride
+  // the version. Without this a sync could report "up to date" while the
+  // local copy held stale values, and the next push would state them back
+  // over the real ones. Crons first, so an unreadable set aborts (a missing
+  // manifest would push "delete every schedule").
+  const crons = await fetchCrons(org, app, "syncing");
+  const state = await fetchAppState(org, app);
+  // What actually differs, computed the same way writeManifestMeta writes:
+  // a field only counts when the platform stated it and it differs from the
+  // local value, so the message never claims a change that wasn't made.
+  const metaChanged = [];
+  if (state.title !== undefined && state.title !== localTitle) metaChanged.push("title");
+  if (state.description !== undefined && state.description !== localDescription) {
+    metaChanged.push("description");
+  }
+  if (JSON.stringify(crons) !== JSON.stringify(localCrons ?? [])) metaChanged.push("schedules");
+  writeManifestMeta(root, { title: state.title, description: state.description, crons });
+  if (metaChanged.length) {
+    console.log(`✓ appato.json updated from the platform (${metaChanged.join(", ")})`);
+  }
   const local = collectFiles(root);
   const localBinHashes = binaryHashes(local.binary);
   const localSha = localSetSha(local.files, localBinHashes);
