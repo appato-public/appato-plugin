@@ -870,7 +870,13 @@ async function history(args = []) {
   }
   for (const v of versions) {
     const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
-    console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}`);
+    // Diffstat sub-line when the server stamped stats (docs/CODE.md V2);
+    // skipped for null/undefined so older servers/versions render unchanged.
+    // "(partial)" mirrors the console: capped stats cover only the first
+    // STATS_MAX_CHANGED files, so the line totals are a floor, not exact.
+    const s = v.stats;
+    const diffstat = s ? `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}` : "";
+    console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}${diffstat}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
   }
   // Rollback accepts any version id, so older targets work either way —
