@@ -120,7 +120,12 @@ below the current directory. You never need to be in a special directory.
    succeeds. If the user wants a previous version back (`appato history`
    lists them), run `appato rollback <version>` — it restores that
    version's files as a new version (history is append-only; nothing is
-   lost) — then `appato sync` to update the local copy.
+   lost) — then `appato sync` to update the local copy. To inspect a past
+   version without checking it out, `appato show <version>` prints its header,
+   composition, and file list, and `appato show <version> <path>` prints one
+   file; to materialize an old version into a fresh directory (its files and
+   its own schedules, ready to sync or push), `appato clone <slug> --version
+   <n>`.
 8. **When a deployed app misbehaves** — a probe of the app URL fails, the
    user reports a bug, or a response carries the `x-appato-error` header —
    run `appato logs` FIRST, before adding debug endpoints or guessing (it's
@@ -173,7 +178,16 @@ above them.
 - `APPATO_CREATED app=<org>/<slug> dir=<json-string> url=<url>` — app
   created; its directory is `dir`.
 - `APPATO_CLONED app=<org>/<slug> version=<n> dir=<json-string> url=<url>`
-  — checkout created (or `existing=true` if it was already there).
+  — checkout created (or `existing=true` if it was already there). `version`
+  is the version checked out: the latest, or the past snapshot named by
+  `appato clone <slug> --version <n>`.
+- `APPATO_SHOW app=<org>/<slug> version=<n> files=<n>` — printed by
+  `appato show [version]` (no path): the version's header, composition, and
+  file list are the human lines above it. Reads one version WITHOUT checking
+  it out; `version` defaults to the latest. `appato show <version> <path>`
+  instead writes that one file's bytes to stdout (or to `-o <path>`) with no
+  machine line, so the output stays the pure file. There is deliberately no
+  `appato diff` — compose a diff from two `show`/`clone` outputs.
 - `APPATO_SYNCED app=<org>/<slug> version=<n> changed=<true|false>
   [files=<n>] sha=<12-hex>` — local copy now matches version `n`. If
   `changed=true`, re-read files before editing.

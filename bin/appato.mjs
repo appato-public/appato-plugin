@@ -57,6 +57,7 @@ try {
     case "whoami": await whoami(); break;
     case "create": await create(args); break;
     case "clone": await clone(args); break;
+    case "show": await show(args); break;
     case "push": await push(args); break;
     case "sync": await sync(args); break;
     case "history": await history(args); break;
@@ -93,8 +94,10 @@ usage:
                             (--all: every app in the org)
   appato create <slug> --title "..." --description "..."  [--org <slug>]
                             create an app in a new ./<slug>/ directory
-  appato clone <slug> [dir] [--org <slug>]
+  appato clone <slug> [dir] [--org <slug>] [--version <n>]
                             check out an existing app into ./<slug>/
+                            (--version checks out that past version's files
+                            and its own schedules, ready to sync or push)
   appato sync [--force]     update local files to the latest pushed version
                             (refuses to discard unpushed local changes)
   appato push -m "..." [--details "..."]
@@ -103,6 +106,11 @@ usage:
   appato history [--json] [--all]  list versions with their change summaries
                             (newest 50 by default; --all walks every page
                             your plan's history window retains)
+  appato show [version] [path] [-o <path>] [--json]
+                            read a version without checking it out. No path:
+                            its header, composition, and file list (version
+                            defaults to the latest). With a path: that file's
+                            bytes to stdout, or to -o <path>
   appato cron [--json]      list the app's schedules, next runs, last results
   appato cron run <name>    run a schedule now (test it without waiting)
   appato cron pause|resume <name>
@@ -505,6 +513,27 @@ async function fetchCrons(org, app, verb) {
   );
 }
 
+/**
+ * The pushed version whose content sha matches, walking /versions pages to
+ * the plan's history wall (same loop as `history --all`, stopping on a hit —
+ * the common case costs one page, exactly what a single fetch did). A
+ * `clone --version` checkout can sit beyond the newest page (docs/CODE.md
+ * "The CLI twin"), and matching only page one misread it as unpushed local
+ * edits. Returns the version row, or null when no version matches.
+ */
+async function findVersionBySha(org, app, sha) {
+  let cursor = 0;
+  do {
+    const res = await apiFetch(`/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `couldn't read versions (${res.status})`);
+    const match = body.versions.find((v) => v.sha === sha);
+    if (match) return match;
+    cursor = body.nextBefore ?? 0;
+  } while (cursor);
+  return null;
+}
+
 /** Rewrite appato.json's `crons` in place -> true if it changed. */
 function writeManifestCrons(root, crons) {
   const path = join(root, "appato.json");
@@ -620,15 +649,31 @@ async function clone(args) {
   }
   const slug = positionals[0];
   const orgFlag = flagValue(args, "--org");
-  if (!slug) throw new Error("usage: appato clone <slug> [dir] [--org <org>]");
+  // A specific past version (v12 or 12) instead of the latest — an immutable
+  // snapshot (docs/CODE.md), materialized just like any checkout.
+  const versionRaw = flagValue(args, "--version");
+  // A bare `--version` reads as flag-absent to flagValue — refuse it rather
+  // than silently cloning the latest, the wrong checkout with a success code.
+  if (args.includes("--version") && versionRaw === undefined) {
+    throw new Error("--version needs a value (e.g. --version 12)");
+  }
+  const version = versionRaw !== undefined ? Number(String(versionRaw).replace(/^v/, "")) : null;
+  if (!slug) throw new Error("usage: appato clone <slug> [dir] [--org <org>] [--version <n>]");
+  if (version !== null && (!Number.isInteger(version) || version < 1)) {
+    throw new Error("--version must be a positive version number (e.g. 12 or v12)");
+  }
   const inside = findAppRoot();
   if (inside) {
     throw new Error(`already inside an appato app (${inside}) — apps don't nest; cd out first`);
   }
   const org = orgFlag ?? (await defaultOrg());
 
+  // The shortcut is a latest-clone convenience only: an explicit --version
+  // must still materialize (the side-by-side diff workflow, docs/CODE.md
+  // "The CLI twin") — the non-empty-dir guard below still protects the
+  // target, so a duplicate destination fails loudly rather than silently.
   const existing = scanChildApps(process.cwd()).find((c) => c.org === org && c.app === slug);
-  if (existing) {
+  if (existing && version === null) {
     console.log(`${org}/${slug} is already checked out at ./${existing.dir}/ — cd in and run: appato sync`);
     console.log(`APPATO_CLONED app=${org}/${slug} dir=${JSON.stringify(existing.dir)} existing=true`);
     return;
@@ -645,18 +690,43 @@ async function clone(args) {
   }
   if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
 
-  // The manifest names every file; contents come one raw fetch per path,
-  // addressed by hash (race-free against a push landing mid-clone) — same
-  // loop as sync, because no endpoint returns a full file set as JSON
-  // (docs/SYNC.md S33). fetchManifest's no_versions branch answers an empty
-  // set for a new app; "no such app" was already excluded above.
-  const man = await fetchManifest(org, slug);
+  // The file set comes from a specific VERSION's manifest (--version) or the
+  // latest one; either way contents come one raw fetch per path, addressed
+  // by hash (race-free against a push landing mid-clone) — no endpoint
+  // returns a full file set as JSON (docs/SYNC.md S33). The cloned tree needs
+  // no extra state: its filesSha equals that version's stored `sha`, so
+  // status/sync/push already do the right thing (status → "behind", sync →
+  // latest, push → a new version).
   const incoming = {};
-  for (const [path, hash] of Object.entries(man.files)) {
-    incoming[path] = await fetchFile(org, slug, path, hash);
+  let crons;
+  let clonedVersion;
+  let fileCount;
+  if (version !== null) {
+    const fres = await apiFetch(`/api/apps/${org}/${slug}/versions/${version}/files`);
+    const fbody = await fres.json();
+    // A walled or missing version surfaces the server's 404 message as-is.
+    if (!fres.ok) throw new Error(fbody.error || `clone failed (${fres.status})`);
+    for (const f of fbody.files) incoming[f.path] = await fetchFile(org, slug, f.path, f.sha256);
+    // C1: this version's own schedules. null means the row predates schedule
+    // recording ("unknown") — and the CLI wire cannot say "unknown": push
+    // always states the full set, and a missing crons key is sent as [] =
+    // "remove every schedule". So unknown falls back to the CURRENT
+    // schedules — stating today's set is what leaves them running, the same
+    // answer rollback gives (unknown → leave alone, never delete).
+    crons = fbody.crons ?? (await fetchCrons(org, slug, "cloning"));
+    clonedVersion = version;
+    fileCount = fbody.files.length;
+  } else {
+    // fetchManifest's no_versions branch answers an empty set for a new app;
+    // "no such app" was already excluded above.
+    const man = await fetchManifest(org, slug);
+    for (const [path, hash] of Object.entries(man.files)) {
+      incoming[path] = await fetchFile(org, slug, path, hash);
+    }
+    crons = await fetchCrons(org, slug, "cloning");
+    clonedVersion = state.latestVersion;
+    fileCount = Object.keys(man.files).length;
   }
-
-  const crons = await fetchCrons(org, slug, "cloning");
 
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, incoming);
@@ -668,20 +738,142 @@ async function clone(args) {
         app: slug,
         title: state.title || slug,
         description: state.description || "",
-        ...(crons.length ? { crons } : {}),
+        ...(crons && crons.length ? { crons } : {}),
       },
       null,
       2,
     ) + "\n",
   );
   const rel = relative(process.cwd(), dir);
-  const fileCount = Object.keys(man.files).length;
   console.log(
-    state.latestVersion > 0
-      ? `Cloned ${org}/${slug} v${state.latestVersion} (${fileCount} files) → ./${rel}/`
+    clonedVersion > 0
+      ? `Cloned ${org}/${slug} v${clonedVersion} (${fileCount} files) → ./${rel}/`
       : `Cloned ${org}/${slug} (no versions pushed yet) → ./${rel}/`,
   );
-  console.log(`APPATO_CLONED app=${org}/${slug} version=${state.latestVersion} dir=${JSON.stringify(rel)} url=${state.url}`);
+  console.log(`APPATO_CLONED app=${org}/${slug} version=${clonedVersion} dir=${JSON.stringify(rel)} url=${state.url}`);
+}
+
+/**
+ * Read one version WITHOUT checking it out (docs/CODE.md "The CLI twin") —
+ * the CLI half of the console's Code tab. No path: the version header, its
+ * composition, and the file list. With a path: that file's bytes, on the same
+ * `-o`/stdout posture as `files get`. Contents ride the existing /file wire
+ * (SYNC.md S33) — no endpoint returns file bodies as JSON.
+ */
+async function show(args = []) {
+  const { org, app } = appConfig();
+  const json = args.includes("--json");
+  const outPath = flagValue(args, "-o");
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-o") i++;
+    else if (a === "--json") continue;
+    else if (a.startsWith("--")) throw new Error(`unknown flag ${a} — see: appato (usage)`);
+    else positionals.push(a);
+  }
+  // `version` (v12 or 12) is optional and comes first; a lone non-numeric
+  // positional is the path with the version left at "latest".
+  let versionArg = null;
+  let filePath;
+  if (positionals[0] !== undefined && /^v?\d+$/.test(positionals[0])) {
+    versionArg = Number(positionals[0].replace(/^v/, ""));
+    filePath = positionals[1];
+  } else {
+    filePath = positionals[0];
+  }
+
+  // Metadata comes from walking /versions pages, same loop as `history --all`,
+  // stopping early on a hit. When no version was named, the newest page's
+  // first row IS the latest. A walled/missing version simply isn't found here
+  // and the /files call below 404s with the server's message.
+  let cursor = 0;
+  let meta;
+  do {
+    const res = await apiFetch(`/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
+    if (versionArg === null) {
+      meta = body.versions[0];
+      break;
+    }
+    meta = body.versions.find((v) => v.id === versionArg);
+    if (meta) break;
+    cursor = body.nextBefore ?? 0;
+  } while (cursor);
+  const id = versionArg ?? meta?.id;
+  if (id == null) throw new Error(`no versions pushed yet — push one first: appato push -m "..."`);
+
+  const res = await apiFetch(`/api/apps/${org}/${app}/versions/${id}/files`);
+  const body = await res.json();
+  // A walled or missing version surfaces the server's 404 message as-is.
+  if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
+
+  if (filePath) {
+    const entry = body.files.find((f) => f.path === filePath);
+    if (!entry) throw new Error(`${filePath} not in v${id}`);
+    // Dumping binary to a terminal is hostile — mirror `files get`.
+    if (entry.binary && !outPath && process.stdout.isTTY) {
+      throw new Error("won't write binary to a terminal — use -o <path> or pipe the output");
+    }
+    const buf = await fetchFile(org, app, filePath, entry.sha256);
+    if (outPath) writeFileSync(outPath, buf);
+    else process.stdout.write(buf);
+    return;
+  }
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        version: id,
+        ...(meta?.message !== undefined ? { message: meta.message } : {}),
+        ...(meta?.stats !== undefined ? { stats: meta.stats } : {}),
+        files: body.files,
+        crons: body.crons,
+      }),
+    );
+    return;
+  }
+
+  const s = meta?.stats;
+  console.log(`v${id}  ${meta ? ago(meta.createdAt) : ""}  ${meta?.message || "(no message)"}`);
+  if (s) {
+    // Same "(partial)" rule as history: capped stats total only the first
+    // STATS_MAX_CHANGED files, so the line is a floor.
+    console.log(`  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`);
+    console.log(`  ${composition(s, body.files)}`);
+  }
+  for (const f of body.files) {
+    console.log(`${f.path}  ${formatBytes(f.bytes)}${f.binary ? "  [binary]" : ""}`);
+  }
+  console.log(`APPATO_SHOW app=${org}/${app} version=${id} files=${body.files.length}`);
+}
+
+/**
+ * A version's makeup for the show header — total source lines, each language's
+ * share of them (from stats.loc), and asset weight (stats.assetBytes, with the
+ * asset count taken from the file listing's binary flags). The console renders
+ * the same three facts as a composition header (docs/CODE.md "The view").
+ */
+function composition(stats, files) {
+  const loc = stats.loc ?? {};
+  const total = Object.values(loc).reduce((a, b) => a + b, 0);
+  const parts = [`${commas(total)} lines`];
+  // Zero-line buckets (empty files) would print "NaN%" at total 0 and a
+  // useless "0%" otherwise — skip them.
+  for (const [lang, n] of Object.entries(loc).sort((a, b) => b[1] - a[1])) {
+    if (n > 0) parts.push(`${lang} ${Math.round((n / total) * 100)}%`);
+  }
+  const assets = files.filter((f) => f.binary).length;
+  if (assets > 0) {
+    parts.push(`${assets} asset${assets === 1 ? "" : "s"}, ${formatBytes(stats.assetBytes)}`);
+  }
+  return parts.join(" · ");
+}
+
+/** Thousands separators, locale-independent (deterministic across machines). */
+function commas(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 // The final APPATO_* line of push/sync/status is a stable machine contract for
@@ -779,10 +971,7 @@ async function sync(args = []) {
     // Safe to overwrite only if the local copy is exactly some pushed version
     // (then nothing would be lost — it's all in history). Otherwise there are
     // unpushed local edits and sync must not discard them.
-    const vres = await apiFetch(`/api/apps/${org}/${app}/versions`);
-    const vbody = await vres.json();
-    if (!vres.ok) throw new Error(vbody.error || `sync failed (${vres.status})`);
-    const match = vbody.versions.find((v) => v.sha === localSha);
+    const match = await findVersionBySha(org, app, localSha);
     if (!match && Object.keys(localHashes).length > 0) {
       console.error(`✗ local files don't match any pushed version — syncing would discard changes in:`);
       for (const p of changed) console.error(`    ${p}`);
@@ -1710,9 +1899,9 @@ async function status(json = false) {
   let syncState = "in_sync";
   let matchesVersion = body.latestVersion;
   if (dirty) {
-    const vres = await apiFetch(`/api/apps/${org}/${app}/versions`);
-    const vbody = await vres.json();
-    const match = vres.ok ? vbody.versions.find((v) => v.sha === localSha) : undefined;
+    // Unknown (a versions read failed) stays "modified" — the safe direction:
+    // status must not invite a sync it can't prove is lossless.
+    const match = await findVersionBySha(org, app, localSha).catch(() => null);
     syncState = match ? "behind" : "modified";
     matchesVersion = match ? match.id : null;
   }
