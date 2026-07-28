@@ -6,7 +6,8 @@ The distributable bundle installed into users' coding agents:
   by both Claude Code and Codex)
 - `bin/appato` + `bin/appato.mjs` — the CLI. Claude Code (>=2.1.91) puts
   plugin `bin/` on the Bash tool's PATH, so `appato` is a bare command with
-  no install step; the `.mjs` is synced from `cli/` by `npm run sync:cli`.
+  no install step; the `.mjs` is generated from `cli/src/` by `npm run
+  build:cli` (untracked here; deploy regenerates it before publishing).
   In Codex (no PATH mechanism) the skill installs it to `~/.appato/bin` via
   `node bin/appato.mjs install`. Credentials/state always live in
   `~/.appato/` — never in the plugin dir, which changes on every update.

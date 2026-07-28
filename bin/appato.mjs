@@ -9,31 +9,51 @@
 // an app, a subdir of an app, or a directory of apps all orient correctly.
 // There is no other state: no registry, no markers, no hidden files.
 
-import {
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  readdirSync,
-  statSync,
-  existsSync,
-  unlinkSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { join, relative, dirname, basename } from "node:path";
-import { createInterface } from "node:readline";
+//
+// GENERATED FILE — do not edit. Authored in cli/src/*.mjs; rebuild with
+// `npm run build:cli`. `npm run verify` fails when this file is stale.
+
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, relative } from "node:path";
+import { createInterface } from "node:readline";
 import { gzipSync } from "node:zlib";
 
+// ---------------------------------------------------------------------------
+// cli/src/config.mjs
+
 const VERSION = "0.9.0";
+
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
+
 const CRED_DIR = join(homedir(), ".appato");
+
 const CRED_FILE = join(CRED_DIR, "credentials.json");
+
 const PENDING_FILE = join(CRED_DIR, "pending-login.json");
+
 // Never uploaded: appato.json is metadata, and _appato.d.ts is a leftover the
 // CLI used to write and no longer does — existing checkouts still have one,
 // and an app must never ship it (the real _appato.js is injected at deploy).
-const IGNORE = new Set(["node_modules", ".git", "dist", ".appato", "appato.json", "_appato.d.ts"]);
+const IGNORE = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  ".appato",
+  "appato.json",
+  "_appato.d.ts",
+]);
+
 // Cloudflare's real 25 MiB per-asset serving CEILING — a platform constant,
 // so the client may pre-check it (unlike a plan knob, which the server owns:
 // a client literal would wrongly block a plan with a higher limit). The
@@ -41,94 +61,8 @@ const IGNORE = new Set(["node_modules", ".git", "dist", ".appato", "appato.json"
 // server's reject at push is the only enforcement. Refuse, never skip.
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 
-const [, , command, ...args] = process.argv;
-
-try {
-  switch (command) {
-    case "login":
-      await login(args);
-      break;
-    case "logout":
-      logout();
-      break;
-    case "whoami":
-      await whoami();
-      break;
-    case "create":
-      await create(args);
-      break;
-    case "clone":
-      await clone(args);
-      break;
-    case "show":
-      await show(args);
-      break;
-    case "push":
-      await push(args);
-      break;
-    case "sync":
-      await sync(args);
-      break;
-    case "history":
-      await history(args);
-      break;
-    case "cron":
-    case "crons":
-      await cron(args);
-      break;
-    case "data":
-      await data(args);
-      break;
-    case "files":
-      await files(args);
-      break;
-    case "rollback":
-      await rollback(args);
-      break;
-    case "pause":
-      await pause();
-      break;
-    case "resume":
-      await resume();
-      break;
-    case "trash":
-      await trash();
-      break;
-    case "restore":
-      await restore();
-      break;
-    case "delete":
-      await deleteForever(args);
-      break;
-    case "status":
-      await status(args.includes("--json"));
-      break;
-    case "logs":
-      await logs(args);
-      break;
-    case "sdk":
-    case "howto":
-    case "docs":
-      sdkHelp();
-      break;
-    case "install":
-      await install();
-      break;
-    case "upgrade":
-      await install();
-      break;
-    case "--version":
-    case "version":
-      console.log(VERSION);
-      break;
-    default:
-      usage();
-      process.exit(command ? 1 : 0);
-  }
-} catch (err) {
-  console.error(`error: ${err.message}`);
-  process.exit(1);
-}
+// ---------------------------------------------------------------------------
+// cli/src/help.mjs
 
 function usage() {
   console.log(`appato ${VERSION} — build & deploy internal utility apps
@@ -398,7 +332,7 @@ WORKFLOW
 }
 
 // ---------------------------------------------------------------------------
-// auth
+// cli/src/auth.mjs
 
 /**
  * Device-flow login, resumable by design: the pending device code is saved
@@ -553,8 +487,35 @@ function semverLt(a, b) {
   return false;
 }
 
+async function whoami() {
+  const res = await apiFetch("/api/me");
+  if (!res.ok) throw new Error(`unauthorized — run: appato login`);
+  const me = await res.json();
+  console.log(`${me.user.email} (orgs: ${me.orgs.map((o) => o.slug).join(", ") || "none"})`);
+}
+
+/** First org membership — the default when --org isn't given. */
+async function defaultOrg() {
+  const res = await apiFetch("/api/me");
+  if (!res.ok) throw new Error("unauthorized — run: appato login");
+  const me = await res.json();
+  const org = me.orgs[0]?.slug;
+  if (!org) throw new Error("you're not in an org yet — create one at " + DEFAULT_HOST);
+  return org;
+}
+
+function tryOpen(url) {
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  try {
+    spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
+  } catch {
+    // fine — user opens the printed URL manually
+  }
+}
+
 // ---------------------------------------------------------------------------
-// anchoring
+// cli/src/anchor.mjs
 
 /**
  * The app's schedules, as manifest entries. Schedules are replace-all on
@@ -675,14 +636,7 @@ function scanChildApps(base) {
 }
 
 // ---------------------------------------------------------------------------
-// commands
-
-async function whoami() {
-  const res = await apiFetch("/api/me");
-  if (!res.ok) throw new Error(`unauthorized — run: appato login`);
-  const me = await res.json();
-  console.log(`${me.user.email} (orgs: ${me.orgs.map((o) => o.slug).join(", ") || "none"})`);
-}
+// cli/src/create.mjs
 
 async function create(args) {
   const positionals = [];
@@ -891,6 +845,9 @@ async function clone(args) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// cli/src/versions.mjs
+
 /**
  * Read one version WITHOUT checking it out (docs/CODE.md "The CLI twin") —
  * the CLI half of the console's Code tab. No path: the version header, its
@@ -1023,6 +980,88 @@ function composition(stats, files) {
 function commas(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
+
+async function history(args = []) {
+  const json = args.includes("--json");
+  const all = args.includes("--all");
+  const { org, app } = appConfig();
+  // The server pages at 50 (nextBefore = the id cursor for the next older
+  // page); --all walks the pages until the plan's history window runs out.
+  // The cursor strictly decreases, so this always terminates.
+  const versions = [];
+  let cursor = 0;
+  let truncated = false;
+  do {
+    const res = await apiFetch(
+      `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
+    );
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
+    versions.push(...body.versions);
+    truncated = !all && !!body.nextBefore;
+    cursor = all ? (body.nextBefore ?? 0) : 0;
+  } while (cursor);
+  if (json) {
+    console.log(JSON.stringify(versions));
+    return;
+  }
+  for (const v of versions) {
+    const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
+    // Diffstat sub-line when the server stamped stats (docs/CODE.md V2);
+    // skipped for null/undefined so older servers/versions render unchanged.
+    // "(partial)" mirrors the console: capped stats cover only the first
+    // STATS_MAX_CHANGED files, so the line totals are a floor, not exact.
+    const s = v.stats;
+    const diffstat = s
+      ? `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`
+      : "";
+    console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}${diffstat}`);
+    if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
+  }
+  // Rollback accepts any version id, so older targets work either way —
+  // this is a discovery hint only.
+  if (truncated) {
+    console.log(`… older versions exist — run: appato history --all`);
+  }
+}
+
+async function rollback(args = []) {
+  const { org, app } = appConfig();
+  const raw = args.find((a) => /^v?\d+$/.test(a));
+  const target = raw ? Number(raw.replace(/^v/, "")) : NaN;
+  if (!Number.isInteger(target) || target < 1) {
+    throw new Error("usage: appato rollback <version> — pick one from appato history");
+  }
+  const res = await apiFetch(`/api/apps/${org}/${app}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ version: target }),
+  });
+  const body = await res.json();
+  if (res.status === 422) {
+    console.error(
+      `✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`,
+    );
+    console.error("The previously deployed version keeps serving.");
+    console.log(
+      `APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} error=${JSON.stringify(body.deployError ?? "unknown")}`,
+    );
+    process.exit(2);
+  }
+  if (!res.ok) throw new Error(body.error || `rollback failed (${res.status})`);
+  // `restored` is the version that authored the content — it differs from
+  // the target when the target was itself a rollback (server resolves to
+  // the origin so rollback chains never form).
+  const restored = body.restored ?? target;
+  const what = restored === target ? `v${target}` : `v${restored}'s code, via v${target}`;
+  console.log(`✓ rolled back — v${body.version} now live (restored ${what}) → ${body.url}`);
+  console.log(`Local files are now behind the new version; run: appato sync`);
+  console.log(
+    `APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// cli/src/pushsync.mjs
 
 // The final APPATO_* line of push/sync/status is a stable machine contract for
 // driving agents (see SKILL.md): space-separated key=value pairs, values
@@ -1195,40 +1234,8 @@ async function sync(args = []) {
   );
 }
 
-async function rollback(args = []) {
-  const { org, app } = appConfig();
-  const raw = args.find((a) => /^v?\d+$/.test(a));
-  const target = raw ? Number(raw.replace(/^v/, "")) : NaN;
-  if (!Number.isInteger(target) || target < 1) {
-    throw new Error("usage: appato rollback <version> — pick one from appato history");
-  }
-  const res = await apiFetch(`/api/apps/${org}/${app}/rollback`, {
-    method: "POST",
-    body: JSON.stringify({ version: target }),
-  });
-  const body = await res.json();
-  if (res.status === 422) {
-    console.error(
-      `✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`,
-    );
-    console.error("The previously deployed version keeps serving.");
-    console.log(
-      `APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} error=${JSON.stringify(body.deployError ?? "unknown")}`,
-    );
-    process.exit(2);
-  }
-  if (!res.ok) throw new Error(body.error || `rollback failed (${res.status})`);
-  // `restored` is the version that authored the content — it differs from
-  // the target when the target was itself a rollback (server resolves to
-  // the origin so rollback chains never form).
-  const restored = body.restored ?? target;
-  const what = restored === target ? `v${target}` : `v${restored}'s code, via v${target}`;
-  console.log(`✓ rolled back — v${body.version} now live (restored ${what}) → ${body.url}`);
-  console.log(`Local files are now behind the new version; run: appato sync`);
-  console.log(
-    `APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`,
-  );
-}
+// ---------------------------------------------------------------------------
+// cli/src/lifecycle.mjs
 
 /**
  * Pause an app: take it offline (dispatch script removed, all versions and
@@ -1327,49 +1334,8 @@ async function deleteForever(args = []) {
   console.log(`APPATO_DELETED app=${org}/${slug}`);
 }
 
-async function history(args = []) {
-  const json = args.includes("--json");
-  const all = args.includes("--all");
-  const { org, app } = appConfig();
-  // The server pages at 50 (nextBefore = the id cursor for the next older
-  // page); --all walks the pages until the plan's history window runs out.
-  // The cursor strictly decreases, so this always terminates.
-  const versions = [];
-  let cursor = 0;
-  let truncated = false;
-  do {
-    const res = await apiFetch(
-      `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
-    );
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
-    versions.push(...body.versions);
-    truncated = !all && !!body.nextBefore;
-    cursor = all ? (body.nextBefore ?? 0) : 0;
-  } while (cursor);
-  if (json) {
-    console.log(JSON.stringify(versions));
-    return;
-  }
-  for (const v of versions) {
-    const flag = v.deployStatus === "deployed" ? "✓" : v.deployStatus === "error" ? "✗" : "·";
-    // Diffstat sub-line when the server stamped stats (docs/CODE.md V2);
-    // skipped for null/undefined so older servers/versions render unchanged.
-    // "(partial)" mirrors the console: capped stats cover only the first
-    // STATS_MAX_CHANGED files, so the line totals are a floor, not exact.
-    const s = v.stats;
-    const diffstat = s
-      ? `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`
-      : "";
-    console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}${diffstat}`);
-    if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
-  }
-  // Rollback accepts any version id, so older targets work either way —
-  // this is a discovery hint only.
-  if (truncated) {
-    console.log(`… older versions exist — run: appato history --all`);
-  }
-}
+// ---------------------------------------------------------------------------
+// cli/src/cron.mjs
 
 /**
  * Schedules (docs/CRON.md). `cron` lists them; `run` fires one immediately
@@ -1453,6 +1419,9 @@ async function cron(args = []) {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// cli/src/data.mjs
 
 /**
  * The Data tool (docs/TOOLS.md "Data"): the operator view over an app's
@@ -1804,6 +1773,9 @@ Anything else is SQL — end each statement with ;`);
   return write;
 }
 
+// ---------------------------------------------------------------------------
+// cli/src/files.mjs
+
 /**
  * The Files tool (docs/FILES.md, docs/TOOLS.md "The Data tool"): the operator
  * view over the app's uploaded blobs — the file twin of `appato data`. Scopes
@@ -2039,6 +2011,9 @@ async function filesRm(org, app, key, scope, user) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// cli/src/logs.mjs
+
 /**
  * Runtime logs (docs/LOGS.md L13): a bounded snapshot that EXITS — never a
  * blocking follow. One request returns error groups, the timeline slice,
@@ -2203,17 +2178,11 @@ async function consoleLogs(args) {
   );
 }
 
-/** First org membership — the default when --org isn't given. */
-async function defaultOrg() {
-  const res = await apiFetch("/api/me");
-  if (!res.ok) throw new Error("unauthorized — run: appato login");
-  const me = await res.json();
-  const org = me.orgs[0]?.slug;
-  if (!org) throw new Error("you're not in an org yet — create one at " + DEFAULT_HOST);
-  return org;
-}
+// ---------------------------------------------------------------------------
+// cli/src/status.mjs
 
-async function status(json = false) {
+async function status(args = []) {
+  const json = args.includes("--json");
   const root = findAppRoot();
   if (!root) return workspaceStatus(json, args.includes("--all"));
 
@@ -2359,6 +2328,9 @@ async function workspaceStatus(json = false, all = false) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// cli/src/install.mjs
+
 /**
  * Install (or update) the CLI into ~/.appato/bin — used both as
  * `appato upgrade` from an installed copy and as the bootstrap path from the
@@ -2399,7 +2371,7 @@ async function install() {
 }
 
 // ---------------------------------------------------------------------------
-// helpers
+// cli/src/tree.mjs
 
 /**
  * Walk the app directory into `{files, binary}`: text files as strings,
@@ -2464,6 +2436,41 @@ function writeFiles(root, files) {
   }
 }
 
+/** `{path: sha256}` for the binary half of a local tree. */
+function binaryHashes(binary) {
+  const out = {};
+  for (const [path, bytes] of Object.entries(binary)) out[path] = sha256HexBytes(bytes);
+  return out;
+}
+
+/**
+ * The 12-hex set hash over BOTH halves. Binary files enter by their sha256
+ * hex as a content stand-in — the server computes the identical stand-in
+ * from its stored references (src/do/app.ts push), so neither side needs
+ * the other's bytes to agree on identity.
+ */
+function localSetSha(files, binHashes) {
+  return filesSha({ ...files, ...binHashes });
+}
+
+/** {path: sha256} for a local file set — the shape the server publishes. */
+function hashFiles(files) {
+  const out = {};
+  for (const [path, content] of Object.entries(files)) out[path] = sha256Hex(content);
+  return out;
+}
+
+/** Paths that differ between two {path: sha256} maps, including either
+ *  side's additions and deletions. Comparing hashes rather than content is
+ *  what lets `status` answer without downloading anything. */
+function manifestDiff(local, remote) {
+  const paths = new Set([...Object.keys(local), ...Object.keys(remote)]);
+  return [...paths].filter((p) => local[p] !== remote[p]).sort();
+}
+
+// ---------------------------------------------------------------------------
+// cli/src/hash.mjs
+
 /**
  * Content address for one file.
  * MUST stay byte-identical to sha256Hex() in src/hash.ts on the server —
@@ -2484,23 +2491,6 @@ function sha256HexBytes(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** `{path: sha256}` for the binary half of a local tree. */
-function binaryHashes(binary) {
-  const out = {};
-  for (const [path, bytes] of Object.entries(binary)) out[path] = sha256HexBytes(bytes);
-  return out;
-}
-
-/**
- * The 12-hex set hash over BOTH halves. Binary files enter by their sha256
- * hex as a content stand-in — the server computes the identical stand-in
- * from its stored references (src/do/app.ts push), so neither side needs
- * the other's bytes to agree on identity.
- */
-function localSetSha(files, binHashes) {
-  return filesSha({ ...files, ...binHashes });
-}
-
 /**
  * Deterministic short hash of a file set (path + content, sorted).
  * MUST stay byte-identical to filesSha() in src/hash.ts on the server — sync
@@ -2517,20 +2507,18 @@ function filesSha(files) {
   return h.digest("hex").slice(0, 12);
 }
 
-/** {path: sha256} for a local file set — the shape the server publishes. */
-function hashFiles(files) {
-  const out = {};
-  for (const [path, content] of Object.entries(files)) out[path] = sha256Hex(content);
-  return out;
+/**
+ * Whole-set validator over a {path: sha256} map.
+ * MUST stay byte-identical to manifestSha() in src/hash.ts — a delta push is
+ * only safe because both ends compute this the same way: this states what
+ * the full set hashes to, the server reconstructs and checks.
+ */
+function manifestSha(files) {
+  return sha256Hex(JSON.stringify(Object.fromEntries(Object.entries(files).sort())));
 }
 
-/** Paths that differ between two {path: sha256} maps, including either
- *  side's additions and deletions. Comparing hashes rather than content is
- *  what lets `status` answer without downloading anything. */
-function manifestDiff(local, remote) {
-  const paths = new Set([...Object.keys(local), ...Object.keys(remote)]);
-  return [...paths].filter((p) => local[p] !== remote[p]).sort();
-}
+// ---------------------------------------------------------------------------
+// cli/src/wire.mjs
 
 async function fetchManifest(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/manifest`);
@@ -2640,16 +2628,6 @@ async function pushRequest(org, app, files, binHashes, delta, meta) {
   });
 }
 
-/**
- * Whole-set validator over a {path: sha256} map.
- * MUST stay byte-identical to manifestSha() in src/hash.ts — a delta push is
- * only safe because both ends compute this the same way: this states what
- * the full set hashes to, the server reconstructs and checks.
- */
-function manifestSha(files) {
-  return sha256Hex(JSON.stringify(Object.fromEntries(Object.entries(files).sort())));
-}
-
 /** One file's BYTES, addressed by hash so a push landing mid-sync can't
  *  swap the bytes we asked for. Returns a Buffer for every kind of file —
  *  downloads are bytes (docs/SYNC.md S33); text is its UTF-8. */
@@ -2688,6 +2666,9 @@ async function putBlob(org, app, path, bytes) {
   if (!res.ok) throw new Error(body.error || `could not upload ${path} (${res.status})`);
   return body.sha256;
 }
+
+// ---------------------------------------------------------------------------
+// cli/src/util.mjs
 
 // Same contract as web/src/lib/time.ts ago(): the "ago" is included.
 // (Deliberately duplicated — the CLI stays a single dependency-free file.)
@@ -2739,12 +2720,94 @@ function flagValue(argv, flag) {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-function tryOpen(url) {
-  const cmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  try {
-    spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
-  } catch {
-    // fine — user opens the printed URL manually
+// ---------------------------------------------------------------------------
+// cli/src/main.mjs
+
+const [, , command, ...args] = process.argv;
+
+try {
+  switch (command) {
+    case "login":
+      await login(args);
+      break;
+    case "logout":
+      logout();
+      break;
+    case "whoami":
+      await whoami();
+      break;
+    case "create":
+      await create(args);
+      break;
+    case "clone":
+      await clone(args);
+      break;
+    case "show":
+      await show(args);
+      break;
+    case "push":
+      await push(args);
+      break;
+    case "sync":
+      await sync(args);
+      break;
+    case "history":
+      await history(args);
+      break;
+    case "cron":
+    case "crons":
+      await cron(args);
+      break;
+    case "data":
+      await data(args);
+      break;
+    case "files":
+      await files(args);
+      break;
+    case "rollback":
+      await rollback(args);
+      break;
+    case "pause":
+      await pause();
+      break;
+    case "resume":
+      await resume();
+      break;
+    case "trash":
+      await trash();
+      break;
+    case "restore":
+      await restore();
+      break;
+    case "delete":
+      await deleteForever(args);
+      break;
+    case "status":
+      await status(args);
+      break;
+    case "logs":
+      await logs(args);
+      break;
+    case "sdk":
+    case "howto":
+    case "docs":
+      sdkHelp();
+      break;
+    case "install":
+      await install();
+      break;
+    case "upgrade":
+      await install();
+      break;
+    case "--version":
+    case "version":
+      console.log(VERSION);
+      break;
+    default:
+      usage();
+      process.exit(command ? 1 : 0);
   }
+} catch (err) {
+  console.error(`error: ${err.message}`);
+  process.exit(1);
 }
