@@ -458,7 +458,7 @@ async function credentials() {
 async function apiFetch(path, options = {}) {
   const cred = await credentials();
   const headers = { "Content-Type": "application/json", ...options.headers };
-  headers["Authorization"] = `Bearer ${cred.bearer}`;
+  headers.Authorization = `Bearer ${cred.bearer}`;
   const res = await fetch(`${cred.host}${path}`, { ...options, headers });
   checkCliVersion(res);
   return res;
@@ -828,7 +828,7 @@ async function clone(args) {
         app: slug,
         title: state.title || slug,
         description: state.description || "",
-        ...(crons && crons.length ? { crons } : {}),
+        ...(crons?.length ? { crons } : {}),
       },
       null,
       2,
@@ -1478,7 +1478,7 @@ async function data(args = []) {
   if (scope !== "mine" && user) {
     throw new Error("--user only applies with --scope mine (other scopes aren't per-person)");
   }
-  if (user && user.includes("@")) user = await resolveDataUser(org, app, user);
+  if (user?.includes("@")) user = await resolveDataUser(org, app, user);
 
   if (sub === "ls") return dataLs(org, app, rest[0] ?? "", scope, user);
   const key = rest[0];
@@ -1816,7 +1816,7 @@ async function files(args = []) {
   if (scope !== "mine" && user) {
     throw new Error("--user only applies with --scope mine (other scopes aren't per-person)");
   }
-  if (user && user.includes("@")) user = await resolveFilesUser(org, app, user);
+  if (user?.includes("@")) user = await resolveFilesUser(org, app, user);
 
   if (sub === "ls") return filesLs(org, app, rest[0] ?? "", scope, user);
   if (sub === "put") {

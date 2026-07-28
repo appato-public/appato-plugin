@@ -25,11 +25,13 @@ ever becomes worth revisiting, both tools support a PostToolUse hook on
 Edit/Write (Codex via apply_patch aliases) that could key off `appato.json`
 in the edited file's ancestry.
 
-Publishing: `scripts/publish-plugin.mjs` (runs as part of `npm run deploy`)
-mirrors this directory to https://github.com/appato-public/appato-plugin —
-the repo agents clone. Claude Code discovers it via the catalog the platform
-worker serves at `/plugin/marketplace.json` (see `src/plugin-catalog.ts`);
-Codex clones the repo directly as a git marketplace.
+Publishing: after `npm run deploy`, the deployment workflow runs
+`npm run publish:plugin` as a separate, retryable step. Its
+`scripts/publish-plugin.mjs` mirrors this directory to
+https://github.com/appato-public/appato-plugin — the repo agents clone.
+Claude Code discovers it via the catalog the platform worker serves at
+`/plugin/marketplace.json` (see `src/plugin-catalog.ts`); Codex clones the
+repo directly as a git marketplace.
 
 Install (Claude Code):
 
