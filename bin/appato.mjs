@@ -33,14 +33,7 @@ const PENDING_FILE = join(CRED_DIR, "pending-login.json");
 // Never uploaded: appato.json is metadata, and _appato.d.ts is a leftover the
 // CLI used to write and no longer does — existing checkouts still have one,
 // and an app must never ship it (the real _appato.js is injected at deploy).
-const IGNORE = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  ".appato",
-  "appato.json",
-  "_appato.d.ts",
-]);
+const IGNORE = new Set(["node_modules", ".git", "dist", ".appato", "appato.json", "_appato.d.ts"]);
 // Cloudflare's real 25 MiB per-asset serving CEILING — a platform constant,
 // so the client may pre-check it (unlike a plan knob, which the server owns:
 // a client literal would wrongly block a plan with a higher limit). The
@@ -52,31 +45,85 @@ const [, , command, ...args] = process.argv;
 
 try {
   switch (command) {
-    case "login": await login(args); break;
-    case "logout": logout(); break;
-    case "whoami": await whoami(); break;
-    case "create": await create(args); break;
-    case "clone": await clone(args); break;
-    case "show": await show(args); break;
-    case "push": await push(args); break;
-    case "sync": await sync(args); break;
-    case "history": await history(args); break;
-    case "cron": case "crons": await cron(args); break;
-    case "data": await data(args); break;
-    case "files": await files(args); break;
-    case "rollback": await rollback(args); break;
-    case "pause": await pause(); break;
-    case "resume": await resume(); break;
-    case "trash": await trash(); break;
-    case "restore": await restore(); break;
-    case "delete": await deleteForever(args); break;
-    case "status": await status(args.includes("--json")); break;
-    case "logs": await logs(args); break;
-    case "sdk": case "howto": case "docs": sdkHelp(); break;
-    case "install": await install(); break;
-    case "upgrade": await install(); break;
-    case "--version": case "version": console.log(VERSION); break;
-    default: usage(); process.exit(command ? 1 : 0);
+    case "login":
+      await login(args);
+      break;
+    case "logout":
+      logout();
+      break;
+    case "whoami":
+      await whoami();
+      break;
+    case "create":
+      await create(args);
+      break;
+    case "clone":
+      await clone(args);
+      break;
+    case "show":
+      await show(args);
+      break;
+    case "push":
+      await push(args);
+      break;
+    case "sync":
+      await sync(args);
+      break;
+    case "history":
+      await history(args);
+      break;
+    case "cron":
+    case "crons":
+      await cron(args);
+      break;
+    case "data":
+      await data(args);
+      break;
+    case "files":
+      await files(args);
+      break;
+    case "rollback":
+      await rollback(args);
+      break;
+    case "pause":
+      await pause();
+      break;
+    case "resume":
+      await resume();
+      break;
+    case "trash":
+      await trash();
+      break;
+    case "restore":
+      await restore();
+      break;
+    case "delete":
+      await deleteForever(args);
+      break;
+    case "status":
+      await status(args.includes("--json"));
+      break;
+    case "logs":
+      await logs(args);
+      break;
+    case "sdk":
+    case "howto":
+    case "docs":
+      sdkHelp();
+      break;
+    case "install":
+      await install();
+      break;
+    case "upgrade":
+      await install();
+      break;
+    case "--version":
+    case "version":
+      console.log(VERSION);
+      break;
+    default:
+      usage();
+      process.exit(command ? 1 : 0);
   }
 } catch (err) {
   console.error(`error: ${err.message}`);
@@ -543,7 +590,9 @@ async function fetchCrons(org, app, verb) {
 async function findVersionBySha(org, app, sha) {
   let cursor = 0;
   do {
-    const res = await apiFetch(`/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`);
+    const res = await apiFetch(
+      `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
+    );
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `couldn't read versions (${res.status})`);
     const match = body.versions.find((v) => v.sha === sha);
@@ -638,7 +687,8 @@ async function whoami() {
 async function create(args) {
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("-")) i++; // skip flag and its value
+    if (args[i].startsWith("-"))
+      i++; // skip flag and its value
     else positionals.push(args[i]);
   }
   const slug = positionals[0];
@@ -662,11 +712,12 @@ async function create(args) {
   const label = flagValue(args, "--label");
   // Twin: graphemes in web/src/features/apps/IconEditor.tsx.
   const graphemes = (s) =>
-    [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].map((g) => g.segment);
+    [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].map(
+      (g) => g.segment,
+    );
   // Twin: isEmoji ↔ src/icons.ts (keycaps carry no pictographic property).
   const isEmoji = (s) =>
-    /^[0-9#*]️?⃣$/.test(s) ||
-    /\p{Extended_Pictographic}|\p{Emoji_Presentation}/u.test(s);
+    /^[0-9#*]️?⃣$/.test(s) || /\p{Extended_Pictographic}|\p{Emoji_Presentation}/u.test(s);
   let emoji, secondEmoji;
   if (emojiArg) {
     const parts = graphemes(emojiArg.trim());
@@ -694,7 +745,10 @@ async function create(args) {
   const res = await apiFetch("/api/apps", {
     method: "POST",
     body: JSON.stringify({
-      slug, org, title, description,
+      slug,
+      org,
+      title,
+      description,
       ...(emoji ? { emoji } : {}),
       ...(secondEmoji ? { secondEmoji } : {}),
       ...(label ? { label } : {}),
@@ -708,9 +762,13 @@ async function create(args) {
     JSON.stringify({ org: body.org, app: body.slug, title, description }, null, 2) + "\n",
   );
   const rel = relative(process.cwd(), dir) || ".";
-  console.log(`Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`);
+  console.log(
+    `Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`,
+  );
   console.log(`URL (after first push): ${body.url}`);
-  console.log(`APPATO_CREATED app=${body.org}/${body.slug} dir=${JSON.stringify(rel)} url=${body.url}`);
+  console.log(
+    `APPATO_CREATED app=${body.org}/${body.slug} dir=${JSON.stringify(rel)} url=${body.url}`,
+  );
 }
 
 async function clone(args) {
@@ -746,8 +804,12 @@ async function clone(args) {
   // target, so a duplicate destination fails loudly rather than silently.
   const existing = scanChildApps(process.cwd()).find((c) => c.org === org && c.app === slug);
   if (existing && version === null) {
-    console.log(`${org}/${slug} is already checked out at ./${existing.dir}/ — cd in and run: appato sync`);
-    console.log(`APPATO_CLONED app=${org}/${slug} dir=${JSON.stringify(existing.dir)} existing=true`);
+    console.log(
+      `${org}/${slug} is already checked out at ./${existing.dir}/ — cd in and run: appato sync`,
+    );
+    console.log(
+      `APPATO_CLONED app=${org}/${slug} dir=${JSON.stringify(existing.dir)} existing=true`,
+    );
     return;
   }
 
@@ -758,7 +820,9 @@ async function clone(args) {
   const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
   const state = await stateRes.json();
   if (stateRes.status === 404) {
-    throw new Error(`no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`);
+    throw new Error(
+      `no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`,
+    );
   }
   if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
 
@@ -822,7 +886,9 @@ async function clone(args) {
       ? `Cloned ${org}/${slug} v${clonedVersion} (${fileCount} files) → ./${rel}/`
       : `Cloned ${org}/${slug} (no versions pushed yet) → ./${rel}/`,
   );
-  console.log(`APPATO_CLONED app=${org}/${slug} version=${clonedVersion} dir=${JSON.stringify(rel)} url=${state.url}`);
+  console.log(
+    `APPATO_CLONED app=${org}/${slug} version=${clonedVersion} dir=${JSON.stringify(rel)} url=${state.url}`,
+  );
 }
 
 /**
@@ -862,7 +928,9 @@ async function show(args = []) {
   let cursor = 0;
   let meta;
   do {
-    const res = await apiFetch(`/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`);
+    const res = await apiFetch(
+      `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
+    );
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
     if (versionArg === null) {
@@ -912,7 +980,9 @@ async function show(args = []) {
   if (s) {
     // Same "(partial)" rule as history: capped stats total only the first
     // STATS_MAX_CHANGED files, so the line is a floor.
-    console.log(`  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`);
+    console.log(
+      `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`,
+    );
     console.log(`  ${composition(s, body.files)}`);
   }
   // The version's own schedules (docs/CRON.md C1) — null/empty prints nothing.
@@ -993,7 +1063,14 @@ async function push(args = []) {
   for (const [path, bytes] of Object.entries(binary)) {
     if (!known.has(binHashes[path])) await putBlob(org, app, path, bytes);
   }
-  let res = await pushRequest(org, app, files, binHashes, deltaAgainst(man, files, binHashes), meta);
+  let res = await pushRequest(
+    org,
+    app,
+    files,
+    binHashes,
+    deltaAgainst(man, files, binHashes),
+    meta,
+  );
   let body = await res.json();
   if (res.status === 409 && body.code === "missing_blob") {
     // The base manifest told us a blob existed but the push disagreed —
@@ -1011,12 +1088,16 @@ async function push(args = []) {
   if (res.status === 422) {
     console.error(`✗ pushed v${body.version}, but deploy FAILED:\n  ${body.deployError}`);
     console.error("Fix the error above and push again.");
-    console.log(`APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} sha=${sha} error=${JSON.stringify(body.deployError ?? "unknown")}`);
+    console.log(
+      `APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} sha=${sha} error=${JSON.stringify(body.deployError ?? "unknown")}`,
+    );
     process.exit(2);
   }
   if (!res.ok) throw new Error(body.error || `push failed (${res.status})`);
   console.log(`✓ deployed v${body.version} → ${body.url}`);
-  console.log(`APPATO_DEPLOYED app=${org}/${app} version=${body.version} sha=${sha} url=${body.url}`);
+  console.log(
+    `APPATO_DEPLOYED app=${org}/${app} version=${body.version} sha=${sha} url=${body.url}`,
+  );
 }
 
 async function sync(args = []) {
@@ -1065,7 +1146,9 @@ async function sync(args = []) {
 
   if (changed.length === 0) {
     console.log(`Already up to date (v${man.version}).`);
-    console.log(`APPATO_SYNCED app=${org}/${app} version=${man.version} changed=false sha=${localSha}`);
+    console.log(
+      `APPATO_SYNCED app=${org}/${app} version=${man.version} changed=false sha=${localSha}`,
+    );
     return;
   }
 
@@ -1075,10 +1158,14 @@ async function sync(args = []) {
     // unpushed local edits and sync must not discard them.
     const match = await findVersionBySha(org, app, localSha);
     if (!match && Object.keys(localHashes).length > 0) {
-      console.error(`✗ local files don't match any pushed version — syncing would discard changes in:`);
+      console.error(
+        `✗ local files don't match any pushed version — syncing would discard changes in:`,
+      );
       for (const p of changed) console.error(`    ${p}`);
       console.error(`Push them first (appato push -m "...") or discard them: appato sync --force`);
-      console.log(`APPATO_SYNC_BLOCKED app=${org}/${app} latest_version=${man.version} local_sha=${localSha}`);
+      console.log(
+        `APPATO_SYNC_BLOCKED app=${org}/${app} latest_version=${man.version} local_sha=${localSha}`,
+      );
       process.exit(2);
     }
   }
@@ -1103,7 +1190,9 @@ async function sync(args = []) {
   const synced = collectFiles(root);
   const syncedSha = localSetSha(synced.files, binaryHashes(synced.binary));
   console.log(`✓ synced to v${man.version} — ${changed.length} file(s) changed`);
-  console.log(`APPATO_SYNCED app=${org}/${app} version=${man.version} changed=true files=${changed.length} sha=${syncedSha}`);
+  console.log(
+    `APPATO_SYNCED app=${org}/${app} version=${man.version} changed=true files=${changed.length} sha=${syncedSha}`,
+  );
 }
 
 async function rollback(args = []) {
@@ -1111,7 +1200,7 @@ async function rollback(args = []) {
   const raw = args.find((a) => /^v?\d+$/.test(a));
   const target = raw ? Number(raw.replace(/^v/, "")) : NaN;
   if (!Number.isInteger(target) || target < 1) {
-    throw new Error('usage: appato rollback <version> — pick one from appato history');
+    throw new Error("usage: appato rollback <version> — pick one from appato history");
   }
   const res = await apiFetch(`/api/apps/${org}/${app}/rollback`, {
     method: "POST",
@@ -1119,9 +1208,13 @@ async function rollback(args = []) {
   });
   const body = await res.json();
   if (res.status === 422) {
-    console.error(`✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`);
+    console.error(
+      `✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`,
+    );
     console.error("The previously deployed version keeps serving.");
-    console.log(`APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} error=${JSON.stringify(body.deployError ?? "unknown")}`);
+    console.log(
+      `APPATO_DEPLOY_FAILED app=${org}/${app} version=${body.version} error=${JSON.stringify(body.deployError ?? "unknown")}`,
+    );
     process.exit(2);
   }
   if (!res.ok) throw new Error(body.error || `rollback failed (${res.status})`);
@@ -1132,7 +1225,9 @@ async function rollback(args = []) {
   const what = restored === target ? `v${target}` : `v${restored}'s code, via v${target}`;
   console.log(`✓ rolled back — v${body.version} now live (restored ${what}) → ${body.url}`);
   console.log(`Local files are now behind the new version; run: appato sync`);
-  console.log(`APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`);
+  console.log(
+    `APPATO_ROLLED_BACK app=${org}/${app} version=${body.version} restored=${restored} url=${body.url}`,
+  );
 }
 
 /**
@@ -1211,7 +1306,8 @@ async function deleteForever(args = []) {
   // VALUE) as the slug — a wrong-target on an irreversible command.
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("-")) i++; // skip flag and its value
+    if (args[i].startsWith("-"))
+      i++; // skip flag and its value
     else positionals.push(args[i]);
   }
   const slug = positionals[0];
@@ -1262,7 +1358,9 @@ async function history(args = []) {
     // "(partial)" mirrors the console: capped stats cover only the first
     // STATS_MAX_CHANGED files, so the line totals are a floor, not exact.
     const s = v.stats;
-    const diffstat = s ? `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}` : "";
+    const diffstat = s
+      ? `  ${s.filesChanged} file${s.filesChanged === 1 ? "" : "s"} +${s.added} −${s.removed}${s.truncated ? " (partial)" : ""}`
+      : "";
     console.log(`${flag} v${v.id}  ${ago(v.createdAt)}  ${v.message || "(no message)"}${diffstat}`);
     if (v.details) console.log(`     ${v.details.replace(/\n/g, "\n     ")}`);
   }
@@ -1285,7 +1383,9 @@ async function cron(args = []) {
 
   if (sub && sub !== "list") {
     if (!["run", "pause", "resume"].includes(sub)) {
-      throw new Error(`unknown cron command "${sub}" — use: list | run <name> | pause <name> | resume <name>`);
+      throw new Error(
+        `unknown cron command "${sub}" — use: list | run <name> | pause <name> | resume <name>`,
+      );
     }
     if (!name) throw new Error(`usage: appato cron ${sub} <name>`);
     const res = await apiFetch(`/api/apps/${org}/${app}/crons/${name}/${sub}`, { method: "POST" });
@@ -1294,7 +1394,9 @@ async function cron(args = []) {
     if (sub === "run") {
       const ok = res.ok && body.status === "ok";
       const detail = body.error ? ` — ${body.error}` : "";
-      console.log(`${ok ? "✓" : "✗"} ran "${name}" (${body.status}, ${body.durationMs}ms)${detail}`);
+      console.log(
+        `${ok ? "✓" : "✗"} ran "${name}" (${body.status}, ${body.durationMs}ms)${detail}`,
+      );
       // What the handler returned. The point of a test run is seeing what the
       // job actually DID, not just that it exited 2xx.
       if (body.output) {
@@ -1321,7 +1423,9 @@ async function cron(args = []) {
   }
   if (body.crons.length === 0) {
     console.log(`No schedules. Add a "crons" array to appato.json and push:`);
-    console.log(`  "crons": [{ "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }]`);
+    console.log(
+      `  "crons": [{ "name": "friday-reminder", "schedule": "0 9 * * 5", "tz": "America/Chicago" }]`,
+    );
     console.log(`Your app handles POST /cron/<name> (see: appato sdk).`);
   } else {
     if (body.suspended) console.log(`⚠ app is paused — no schedule runs until it's resumed`);
@@ -1334,11 +1438,15 @@ async function cron(args = []) {
           ? `next ${until(c.nextAt)}`
           : "not scheduled";
       const last = c.lastRun ? `  last ${c.lastRun.status} ${ago(c.lastRun.startedAt)}` : "";
-      console.log(`${c.paused ? "⏸" : "●"} ${c.name}  ${c.schedule}${c.tz ? ` ${c.tz}` : " UTC"}  ${when}${last}`);
+      console.log(
+        `${c.paused ? "⏸" : "●"} ${c.name}  ${c.schedule}${c.tz ? ` ${c.tz}` : " UTC"}  ${when}${last}`,
+      );
       if (c.lastRun?.error) console.log(`     ${c.lastRun.error}`);
     }
   }
-  console.log(`APPATO_CRONS app=${org}/${app} count=${body.crons.length} suspended=${body.suspended}`);
+  console.log(
+    `APPATO_CRONS app=${org}/${app} count=${body.crons.length} suspended=${body.suspended}`,
+  );
   for (const c of body.crons) {
     console.log(
       `APPATO_CRON name=${c.name} schedule=${JSON.stringify(c.schedule)} tz=${c.tz ?? "UTC"} paused=${c.paused} paused_by=${c.pausedBy ?? "none"} next_at=${c.nextAt ?? "none"} failures=${c.consecutiveFailures} last_status=${c.lastRun?.status ?? "never"}`,
@@ -1413,7 +1521,9 @@ async function data(args = []) {
   if (sub === "get") return dataGet(org, app, key, scope, user);
   if (sub === "rm") return dataRm(org, app, key, scope, user);
   if (rest[1] === undefined) {
-    throw new Error('usage: appato data set <key> <value|-> — value is JSON (or a plain string); "-" reads stdin');
+    throw new Error(
+      'usage: appato data set <key> <value|-> — value is JSON (or a plain string); "-" reads stdin',
+    );
   }
   return dataSet(org, app, key, rest[1], scope, user);
 }
@@ -1512,7 +1622,9 @@ async function dataGet(org, app, key, scope, user) {
   const hit = body.entries.find((e) => e.key === key);
   if (!hit) {
     console.error(`no key ${JSON.stringify(key)} in ${scope}`);
-    console.log(`APPATO_KV app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`);
+    console.log(
+      `APPATO_KV app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`,
+    );
     process.exit(1);
   }
   console.log(JSON.stringify(hit.value, null, 2));
@@ -1592,7 +1704,13 @@ function printSqlRows(rows) {
   const widths = cols.map((c, i) => Math.max(c.length, ...grid.map((g) => g[i].length)));
   console.log(cols.map((c, i) => c.padEnd(widths[i])).join("  "));
   console.log(widths.map((w) => "-".repeat(w)).join("  "));
-  for (const g of grid) console.log(g.map((s, i) => s.padEnd(widths[i])).join("  ").trimEnd());
+  for (const g of grid)
+    console.log(
+      g
+        .map((s, i) => s.padEnd(widths[i]))
+        .join("  ")
+        .trimEnd(),
+    );
 }
 
 function sqlCounts(result) {
@@ -1839,7 +1957,9 @@ async function filesGet(org, app, key, scope, user, outPath) {
   const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`);
   if (res.status === 404) {
     console.error(`no file ${JSON.stringify(key)} in ${scope}`);
-    console.log(`APPATO_FILE app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`);
+    console.log(
+      `APPATO_FILE app=${org}/${app} scope=${scope} key=${JSON.stringify(key)} found=false`,
+    );
     process.exit(1);
   }
   if (!res.ok) {
@@ -1871,11 +1991,24 @@ async function filesPut(org, app, path, key, scope, user, type) {
   // server never trusts it (it stores whatever content-type it's handed); it's
   // only so `put logo.png` does the obvious thing without a --type flag.
   const types = {
-    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
-    webp: "image/webp", svg: "image/svg+xml", pdf: "application/pdf",
-    txt: "text/plain", md: "text/markdown", json: "application/json",
-    csv: "text/csv", html: "text/html", css: "text/css", js: "text/javascript",
-    mp4: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", wav: "audio/wav",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    svg: "image/svg+xml",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    md: "text/markdown",
+    json: "application/json",
+    csv: "text/csv",
+    html: "text/html",
+    css: "text/css",
+    js: "text/javascript",
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
   };
   const ext = src.includes(".") ? src.slice(src.lastIndexOf(".") + 1).toLowerCase() : "";
   const contentType = type || types[ext] || "application/octet-stream";
@@ -1979,7 +2112,13 @@ async function logs(args = []) {
   // keep the rendered text identical.
   let clientDropped = 0;
   const dropReport = (e) => {
-    if (e.message !== "client_report" || typeof e.context !== "object" || !e.context || Array.isArray(e.context)) return null;
+    if (
+      e.message !== "client_report" ||
+      typeof e.context !== "object" ||
+      !e.context ||
+      Array.isArray(e.context)
+    )
+      return null;
     const counts = Object.entries(e.context).filter(([, n]) => typeof n === "number" && n > 0);
     if (counts.length === 0) return null;
     for (const [, n] of counts) clientDropped += n;
@@ -1996,7 +2135,9 @@ async function logs(args = []) {
     // currently time-to-headers, which excludes the slowest part of a
     // streamed response. The console shows it labeled "server time"; here
     // the flat line stays duration-free (agents read ms as latency).
-    console.log(`${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}${cut}`);
+    console.log(
+      `${hms(e.ts)} ${e.source} ${e.level} ${dropReport(e) ?? e.message}${v}${who}${cut}`,
+    );
     if (e.source === "browser" && e.rid) {
       const srv = serverErrByRid.get(e.rid);
       if (srv) console.log(`    ↳ server, same request: ${srv.message}`);
@@ -2019,7 +2160,8 @@ async function logs(args = []) {
   if (s.dropped > 0 || clientDropped > 0 || s.truncated) {
     const parts = [];
     if (s.dropped > 0) parts.push(`${s.dropped} event(s) were dropped at capture (rate/size caps)`);
-    if (clientDropped > 0) parts.push(`${clientDropped} event(s) were dropped in the browser before sending`);
+    if (clientDropped > 0)
+      parts.push(`${clientDropped} event(s) were dropped in the browser before sending`);
     if (s.truncated) parts.push(`some entries are truncated`);
     console.log(`⚠ ${parts.join("; ")} — the picture above is incomplete.`);
   }
@@ -2052,9 +2194,13 @@ async function consoleLogs(args) {
     if (e.stack) for (const l of String(e.stack).split("\n")) console.log(`    ${l.trim()}`);
   }
   if (events.length === 0) {
-    console.log(`No server console output in this window (default 1h; --since 24h reaches back; ~7-day retention).`);
+    console.log(
+      `No server console output in this window (default 1h; --since 24h reaches back; ~7-day retention).`,
+    );
   }
-  console.log(`APPATO_LOGS_CONSOLE app=${org}/${app} window_since=${body.since} entries=${events.length}`);
+  console.log(
+    `APPATO_LOGS_CONSOLE app=${org}/${app} window_since=${body.since} entries=${events.length}`,
+  );
 }
 
 /** First org membership — the default when --org isn't given. */
@@ -2086,10 +2232,7 @@ async function status(json = false) {
   const local = collectFiles(root);
   const localBinHashes = binaryHashes(local.binary);
   const localSha = localSetSha(local.files, localBinHashes);
-  const changedFiles = manifestDiff(
-    { ...hashFiles(local.files), ...localBinHashes },
-    man.files,
-  );
+  const changedFiles = manifestDiff({ ...hashFiles(local.files), ...localBinHashes }, man.files);
   const dirty = changedFiles.length > 0;
 
   // Distinguish "behind" (local equals an older pushed version — sync) from
@@ -2139,15 +2282,23 @@ async function status(json = false) {
   } else {
     console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
   }
-  console.log(`version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)})` : ""}` : "never"}`);
+  console.log(
+    `version:  latest v${out.latestVersion}, deployed ${out.deployedVersion ? `v${out.deployedVersion}${out.deployedAt ? ` (${ago(out.deployedAt)})` : ""}` : "never"}`,
+  );
   if (!dirty) {
     console.log(`local:    in sync with pushed version`);
   } else if (syncState === "behind") {
-    console.log(`local:    ⚠ behind — local matches v${matchesVersion}, latest is v${out.latestVersion}; run: appato sync`);
+    console.log(
+      `local:    ⚠ behind — local matches v${matchesVersion}, latest is v${out.latestVersion}; run: appato sync`,
+    );
   } else {
-    console.log(`local:    ⚠ ${changedFiles.length} file(s) with unpushed changes — run: appato push`);
+    console.log(
+      `local:    ⚠ ${changedFiles.length} file(s) with unpushed changes — run: appato push`,
+    );
   }
-  console.log(`APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} status=${body.status ?? "active"} deletes_at=${body.deletesAt ?? "none"} sha=${out.localSha} url=${out.url}`);
+  console.log(
+    `APPATO_STATUS app=${out.app} deployed_version=${out.deployedVersion ?? "none"} deployed_at=${out.deployedAt ?? "never"} dirty=${out.dirty} state=${syncState} status=${body.status ?? "active"} deletes_at=${body.deletesAt ?? "none"} sha=${out.localSha} url=${out.url}`,
+  );
 }
 
 /**
@@ -2186,7 +2337,9 @@ async function workspaceStatus(json = false, all = false) {
         : `No apps of yours in ${body.org} yet — create one, or \`appato status --all\` to see everyone's.`,
     );
   } else {
-    console.log(`${all ? "All apps" : "Your apps"} in ${body.org} (● = checked out below this directory):`);
+    console.log(
+      `${all ? "All apps" : "Your apps"} in ${body.org} (● = checked out below this directory):`,
+    );
     for (const a of apps) {
       console.log(
         a.dir
@@ -2196,9 +2349,13 @@ async function workspaceStatus(json = false, all = false) {
     }
     if (!all) console.log(`(yours only — \`appato status --all\` lists the whole org)`);
   }
-  console.log(`APPATO_WORKSPACE org=${body.org} scope=${scope} apps=${apps.length} checked_out=${apps.filter((a) => a.dir).length}`);
+  console.log(
+    `APPATO_WORKSPACE org=${body.org} scope=${scope} apps=${apps.length} checked_out=${apps.filter((a) => a.dir).length}`,
+  );
   for (const a of apps) {
-    console.log(`APPATO_APP app=${body.org}/${a.slug} dir=${a.dir ? JSON.stringify("./" + a.dir) : "none"}`);
+    console.log(
+      `APPATO_APP app=${body.org}/${a.slug} dir=${a.dir ? JSON.stringify("./" + a.dir) : "none"}`,
+    );
   }
 }
 
@@ -2234,7 +2391,9 @@ async function install() {
   const version = execSync(`node "${target}" --version`).toString().trim();
   console.log(`Installed appato v${version} (${source}) → ${wrapper}`);
   if (!(process.env.PATH ?? "").split(":").includes(binDir)) {
-    console.log(`Not on PATH — use ${wrapper} directly, or add: export PATH="$HOME/.appato/bin:$PATH"`);
+    console.log(
+      `Not on PATH — use ${wrapper} directly, or add: export PATH="$HOME/.appato/bin:$PATH"`,
+    );
   }
   console.log(`APPATO_INSTALLED version=${version} path=${JSON.stringify(wrapper)}`);
 }
@@ -2350,7 +2509,10 @@ function localSetSha(files, binHashes) {
 function filesSha(files) {
   const h = createHash("sha256");
   for (const path of Object.keys(files).sort()) {
-    h.update(path).update("\0").update(files[path] ?? "").update("\0");
+    h.update(path)
+      .update("\0")
+      .update(files[path] ?? "")
+      .update("\0");
   }
   return h.digest("hex").slice(0, 12);
 }
@@ -2461,7 +2623,14 @@ async function pushRequest(org, app, files, binHashes, delta, meta) {
   // PUT /blob before this request, so the push itself never carries them
   // (binary never touches JSON — docs/SYNC.md S16).
   const payload = delta
-    ? { ...meta, base: delta.base, files: delta.files, deleted: delta.deleted, sha256: delta.sha256, binary: binHashes }
+    ? {
+        ...meta,
+        base: delta.base,
+        files: delta.files,
+        deleted: delta.deleted,
+        sha256: delta.sha256,
+        binary: binHashes,
+      }
     : { ...meta, files, binary: binHashes };
   const gz = gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
   return apiFetch(`/api/apps/${org}/${app}/push`, {
@@ -2571,7 +2740,8 @@ function flagValue(argv, flag) {
 }
 
 function tryOpen(url) {
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   try {
     spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
   } catch {
