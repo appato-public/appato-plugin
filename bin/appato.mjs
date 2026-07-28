@@ -1665,8 +1665,8 @@ async function dataRm(org, app, key, scope, user) {
   );
 }
 
-/** POST /data/sql — one statement. A 400 (e.g. "this statement writes —
- * re-run with --write") throws, which is the existing error style. */
+/** POST /data/sql — one statement. Any refusal (e.g. the 409 "this statement
+ * writes — re-run with --write") throws, which is the existing error style. */
 async function postDataSql(org, app, query, write) {
   const res = await apiFetch(`/api/apps/${org}/${app}/data/sql`, {
     method: "POST",
