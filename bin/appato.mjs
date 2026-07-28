@@ -352,7 +352,8 @@ async function login(args = []) {
       body: JSON.stringify({ client_id: "appato-cli" }),
     });
     if (!codeRes.ok) throw new Error(`device flow unavailable (${codeRes.status})`);
-    const code = await codeRes.json();
+    // Device auth flow: out of the typed-contract scope (not an /api route).
+    const code = /** @type {any} */ (await codeRes.json());
     pending = {
       host,
       device_code: code.device_code,
@@ -397,7 +398,7 @@ async function exchangePendingLogin(pending) {
     }),
   });
   if (res.ok) {
-    const token = await res.json();
+    const token = /** @type {any} */ (await res.json());
     // Device-flow session token, sent as Authorization: Bearer.
     // TODO: exchange for a long-lived API key once the server supports it.
     const cred = { host: pending.host, bearer: token.access_token };
@@ -407,7 +408,7 @@ async function exchangePendingLogin(pending) {
     console.log("Logged in.");
     return true;
   }
-  const body = await res.json().catch(() => ({}));
+  const body = /** @type {any} */ (await res.json().catch(() => ({})));
   if (body.error === "authorization_pending" || body.error === "slow_down") return false;
   rmPendingLogin();
   throw new Error(`login failed: ${body.error || res.status}`);
@@ -490,7 +491,7 @@ function semverLt(a, b) {
 async function whoami() {
   const res = await apiFetch("/api/me");
   if (!res.ok) throw new Error(`unauthorized — run: appato login`);
-  const me = await res.json();
+  const me = /** @type {AuthContext} */ (await res.json());
   console.log(`${me.user.email} (orgs: ${me.orgs.map((o) => o.slug).join(", ") || "none"})`);
 }
 
@@ -498,7 +499,7 @@ async function whoami() {
 async function defaultOrg() {
   const res = await apiFetch("/api/me");
   if (!res.ok) throw new Error("unauthorized — run: appato login");
-  const me = await res.json();
+  const me = /** @type {AuthContext} */ (await res.json());
   const org = me.orgs[0]?.slug;
   if (!org) throw new Error("you're not in an org yet — create one at " + DEFAULT_HOST);
   return org;
@@ -527,7 +528,7 @@ function tryOpen(url) {
 async function fetchCrons(org, app, verb) {
   const res = await apiFetch(`/api/apps/${org}/${app}/crons`);
   if (res.ok) {
-    return (await res.json()).crons.map((c) => ({
+    return /** @type {CronList} */ (await res.json()).crons.map((c) => ({
       name: c.name,
       schedule: c.schedule,
       ...(c.tz ? { tz: c.tz } : {}),
@@ -554,7 +555,7 @@ async function findVersionBySha(org, app, sha) {
     const res = await apiFetch(
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
-    const body = await res.json();
+    const body = /** @type {Wire<VersionsPage>} */ (await res.json());
     if (!res.ok) throw new Error(body.error || `couldn't read versions (${res.status})`);
     const match = body.versions.find((v) => v.sha === sha);
     if (match) return match;
@@ -589,7 +590,7 @@ function writeManifestMeta(root, { title, description, crons }) {
  * server-owned title/description that sync refreshes into appato.json. */
 async function fetchAppState(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}`);
-  const body = await res.json();
+  const body = /** @type {Wire<AppDetail>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `couldn't read ${org}/${app} (${res.status})`);
   return body;
 }
@@ -708,7 +709,7 @@ async function create(args) {
       ...(label ? { label } : {}),
     }),
   });
-  const body = await res.json();
+  const body = /** @type {Wire<CreateApp>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `create failed (${res.status})`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -772,7 +773,7 @@ async function clone(args) {
     throw new Error(`${relative(process.cwd(), dir)}/ already exists and is not empty`);
   }
   const stateRes = await apiFetch(`/api/apps/${org}/${slug}`);
-  const state = await stateRes.json();
+  const state = /** @type {Wire<AppDetail>} */ (await stateRes.json());
   if (stateRes.status === 404) {
     throw new Error(
       `no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`,
@@ -793,7 +794,7 @@ async function clone(args) {
   let fileCount;
   if (version !== null) {
     const fres = await apiFetch(`/api/apps/${org}/${slug}/versions/${version}/files`);
-    const fbody = await fres.json();
+    const fbody = /** @type {Wire<VersionFiles>} */ (await fres.json());
     // A walled or missing version surfaces the server's 404 message as-is.
     if (!fres.ok) throw new Error(fbody.error || `clone failed (${fres.status})`);
     for (const f of fbody.files) incoming[f.path] = await fetchFile(org, slug, f.path, f.sha256);
@@ -888,7 +889,7 @@ async function show(args = []) {
     const res = await apiFetch(
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
-    const body = await res.json();
+    const body = /** @type {Wire<VersionsPage>} */ (await res.json());
     if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
     if (versionArg === null) {
       meta = body.versions[0];
@@ -902,7 +903,7 @@ async function show(args = []) {
   if (id == null) throw new Error(`no versions pushed yet — push one first: appato push -m "..."`);
 
   const res = await apiFetch(`/api/apps/${org}/${app}/versions/${id}/files`);
-  const body = await res.json();
+  const body = /** @type {Wire<VersionFiles>} */ (await res.json());
   // A walled or missing version surfaces the server's 404 message as-is.
   if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
 
@@ -995,7 +996,7 @@ async function history(args = []) {
     const res = await apiFetch(
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
-    const body = await res.json();
+    const body = /** @type {Wire<VersionsPage>} */ (await res.json());
     if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
     versions.push(...body.versions);
     truncated = !all && !!body.nextBefore;
@@ -1036,7 +1037,7 @@ async function rollback(args = []) {
     method: "POST",
     body: JSON.stringify({ version: target }),
   });
-  const body = await res.json();
+  const body = /** @type {Wire<Rollback>} */ (await res.json());
   if (res.status === 422) {
     console.error(
       `✗ created v${body.version} from v${target}, but deploy FAILED:\n  ${body.deployError}`,
@@ -1110,7 +1111,9 @@ async function push(args = []) {
     deltaAgainst(man, files, binHashes),
     meta,
   );
-  let body = await res.json();
+  // The push wire (delta/base reconstruction, blob refs) is out of the typed
+  // /api contract scope — SYNC.md owns its shape.
+  let body = /** @type {any} */ (await res.json());
   if (res.status === 409 && body.code === "missing_blob") {
     // The base manifest told us a blob existed but the push disagreed —
     // upload everything we have and say the whole thing.
@@ -1245,7 +1248,7 @@ async function sync(args = []) {
 async function pause() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/pause`, { method: "POST" });
-  const body = await res.json();
+  const body = /** @type {Wire<AppPaused>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `pause failed (${res.status})`);
   console.log(`✓ paused ${org}/${app} — offline, data frozen. Resume with: appato resume`);
   console.log(`APPATO_PAUSED app=${org}/${app}`);
@@ -1255,7 +1258,10 @@ async function pause() {
 async function resume() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/resume`, { method: "POST" });
-  const body = await res.json();
+  // 200 body is a union (active with/without a redeployed version); the fields
+  // read below live on one arm only, so a plain `any` avoids a spurious
+  // union-narrowing error — deliberately looser per the spec's escape hatch.
+  const body = /** @type {any} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `resume failed (${res.status})`);
   // The API answers 200 with the redeploy's outcome in the body: a failed
   // redeploy means the app is active but still offline (no script, schedules
@@ -1277,7 +1283,7 @@ async function resume() {
 async function trash() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/trash`, { method: "POST" });
-  const body = await res.json();
+  const body = /** @type {Wire<AppTrashed>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `trash failed (${res.status})`);
   console.log(`✓ moved ${org}/${app} to the trash — offline, frozen. Restore with: appato restore`);
   console.log(`APPATO_TRASHED app=${org}/${app} deletes_at=${body.deletesAt ?? "none"}`);
@@ -1287,7 +1293,9 @@ async function trash() {
 async function restore() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/restore`, { method: "POST" });
-  const body = await res.json();
+  // 200 body is the same active-with/without-version union as resume — `any`
+  // for the same reason (fields read live on one arm only).
+  const body = /** @type {any} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `restore failed (${res.status})`);
   // A failed redeploy leaves the app active-but-offline (same shape as resume) —
   // that is not a clean restore, so no APPATO_RESTORED.
@@ -1328,7 +1336,7 @@ async function deleteForever(args = []) {
   }
   const org = flagValue(args, "--org") || (await defaultOrg());
   const res = await apiFetch(`/api/apps/${org}/${slug}`, { method: "DELETE" });
-  const body = await res.json().catch(() => ({}));
+  const body = /** @type {Wire<AppDeleted>} */ (await res.json().catch(() => ({})));
   if (!res.ok) throw new Error(body.error || `delete failed (${res.status})`);
   console.log(`✓ deleted ${org}/${slug} forever`);
   console.log(`APPATO_DELETED app=${org}/${slug}`);
@@ -1355,7 +1363,8 @@ async function cron(args = []) {
     }
     if (!name) throw new Error(`usage: appato cron ${sub} <name>`);
     const res = await apiFetch(`/api/apps/${org}/${app}/crons/${name}/${sub}`, { method: "POST" });
-    const body = await res.json();
+    // run yields a CronRun; pause/resume only read `error` here, which Wire adds.
+    const body = /** @type {Wire<CronRun>} */ (await res.json());
     if (res.status === 404) throw new Error(body.error || `no cron "${name}" in appato.json`);
     if (sub === "run") {
       const ok = res.ok && body.status === "ok";
@@ -1381,7 +1390,7 @@ async function cron(args = []) {
   }
 
   const res = await apiFetch(`/api/apps/${org}/${app}/crons`);
-  const body = await res.json();
+  const body = /** @type {Wire<CronList>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `cron list failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
@@ -1501,7 +1510,7 @@ async function data(args = []) {
  * REPL's .tables/.schema. */
 async function fetchDataOverview(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/data`);
-  const body = await res.json();
+  const body = /** @type {Wire<DataOverview>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `data overview failed (${res.status})`);
   return body;
 }
@@ -1559,7 +1568,7 @@ async function dataLs(org, app, prefix, scope, user) {
   if (user) params.set("user", user);
   if (prefix) params.set("prefix", prefix);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
-  const body = await res.json();
+  const body = /** @type {Wire<DataKvPage>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `data ls failed (${res.status})`);
   for (const e of body.entries) {
     console.log(`${e.key}  ${e.by ? e.by.name : "app server"}  ${ago(e.at)}`);
@@ -1586,7 +1595,7 @@ async function dataGet(org, app, key, scope, user) {
   const params = new URLSearchParams({ scope, prefix: key });
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
-  const body = await res.json();
+  const body = /** @type {Wire<DataKvPage>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `data get failed (${res.status})`);
   const hit = body.entries.find((e) => e.key === key);
   if (!hit) {
@@ -1616,7 +1625,7 @@ async function dataSet(org, app, key, rawValue, scope, user) {
     method: "PUT",
     body: JSON.stringify({ scope, ...(user ? { user } : {}), key, value }),
   });
-  const body = await res.json();
+  const body = /** @type {Wire<DataKvPut>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `data set failed (${res.status})`);
   console.log(`✓ set ${scope}:${key}`);
   console.log(`APPATO_KV_SET app=${org}/${app} scope=${scope} key=${JSON.stringify(key)}`);
@@ -1626,7 +1635,7 @@ async function dataRm(org, app, key, scope, user) {
   const params = new URLSearchParams({ scope, key });
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`, { method: "DELETE" });
-  const body = await res.json();
+  const body = /** @type {Wire<DataKvDelete>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `data rm failed (${res.status})`);
   console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
   console.log(
@@ -1641,7 +1650,7 @@ async function postDataSql(org, app, query, write) {
     method: "POST",
     body: JSON.stringify({ query, write }),
   });
-  const body = await res.json();
+  const body = /** @type {Wire<SqlResult>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `sql failed (${res.status})`);
   return body;
 }
@@ -1840,7 +1849,7 @@ async function files(args = []) {
 /** GET /files — shared by the overview command and email→id resolution. */
 async function fetchFilesOverview(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/files`);
-  const body = await res.json();
+  const body = /** @type {Wire<FilesOverview>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `files overview failed (${res.status})`);
   return body;
 }
@@ -1893,7 +1902,7 @@ async function filesLs(org, app, prefix, scope, user) {
   if (user) params.set("user", user);
   if (prefix) params.set("prefix", prefix);
   const res = await apiFetch(`/api/apps/${org}/${app}/files/ls?${params}`);
-  const body = await res.json();
+  const body = /** @type {Wire<FilesPage>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `files ls failed (${res.status})`);
   for (const f of body.files) {
     console.log(
@@ -1935,7 +1944,8 @@ async function filesGet(org, app, key, scope, user, outPath) {
     process.exit(1);
   }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    // File bytes (GET /file) are out of the typed scope; only the error is read.
+    const body = /** @type {any} */ (await res.json().catch(() => ({})));
     throw new Error(body.error || `files get failed (${res.status})`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
@@ -1991,7 +2001,8 @@ async function filesPut(org, app, path, key, scope, user, type) {
     headers: { "Content-Type": contentType },
     body,
   });
-  const resBody = await res.json().catch(() => ({}));
+  // Blob upload (PUT /file) is out of the typed scope; only the error is read.
+  const resBody = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) throw new Error(resBody.error || `files put failed (${res.status})`);
   console.log(`✓ uploaded ${scope}:${name} (${formatBytes(body.length)})`);
   console.log(
@@ -2003,7 +2014,7 @@ async function filesRm(org, app, key, scope, user) {
   const params = new URLSearchParams({ scope, key });
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`, { method: "DELETE" });
-  const body = await res.json();
+  const body = /** @type {Wire<FileDelete>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `files rm failed (${res.status})`);
   console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
   console.log(
@@ -2038,7 +2049,7 @@ async function logs(args = []) {
 
   const qs = params.toString();
   const res = await apiFetch(`/api/apps/${org}/${app}/logs${qs ? `?${qs}` : ""}`);
-  const body = await res.json();
+  const body = /** @type {Wire<AppLogs>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `logs failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
@@ -2156,7 +2167,7 @@ async function consoleLogs(args) {
   const n = flagValue(args, "-n");
   if (n) params.set("limit", n);
   const res = await apiFetch(`/api/apps/${org}/${app}/logs/console?${params}`);
-  const body = await res.json();
+  const body = /** @type {Wire<ConsoleLogs>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `console logs failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
@@ -2196,7 +2207,7 @@ async function status(args = []) {
     apiFetch(`/api/apps/${org}/${app}`),
     fetchManifest(org, app),
   ]);
-  const body = await res.json();
+  const body = /** @type {Wire<AppDetail>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
   const local = collectFiles(root);
   const localBinHashes = binaryHashes(local.binary);
@@ -2277,7 +2288,7 @@ async function status(args = []) {
  */
 async function workspaceStatus(json = false, all = false) {
   const res = await apiFetch(`/api/apps${all ? "" : "?mine=1"}`);
-  const body = await res.json();
+  const body = /** @type {Wire<AppList>} */ (await res.json());
   if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
   const local = scanChildApps(process.cwd());
   const localByApp = new Map(local.map((c) => [`${c.org}/${c.app}`, c.dir]));
@@ -2522,7 +2533,8 @@ function manifestSha(files) {
 
 async function fetchManifest(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/manifest`);
-  const body = await res.json();
+  // Manifest reads carry ETag/version-skew semantics — out of the typed scope.
+  const body = /** @type {any} */ (await res.json());
   // A 404 is ambiguous: "this app has no versions yet" and "this app does
   // not exist" look identical from here. Only the first may become an empty
   // manifest — treating the second that way makes a deleted or renamed app
@@ -2636,7 +2648,7 @@ async function fetchFile(org, app, path, sha256) {
     `/api/apps/${org}/${app}/file?path=${encodeURIComponent(path)}&sha256=${sha256}`,
   );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    const body = /** @type {any} */ (await res.json().catch(() => ({})));
     throw new Error(body.error || `could not fetch ${path} (${res.status})`);
   }
   // Version-skew tolerance: a not-yet-propagated pre-0.7 server answers
@@ -2644,7 +2656,7 @@ async function fetchFile(org, app, path, sha256) {
   // branch, that window writes a JSON envelope into the working tree as
   // file content.
   if ((res.headers.get("content-type") || "").includes("application/json")) {
-    const body = await res.json();
+    const body = /** @type {any} */ (await res.json());
     return Buffer.from(body.content, "utf8");
   }
   return Buffer.from(await res.arrayBuffer());
@@ -2662,7 +2674,7 @@ async function putBlob(org, app, path, bytes) {
     headers: { "Content-Type": "application/octet-stream" },
     body: bytes,
   });
-  const body = await res.json().catch(() => ({}));
+  const body = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) throw new Error(body.error || `could not upload ${path} (${res.status})`);
   return body.sha256;
 }
