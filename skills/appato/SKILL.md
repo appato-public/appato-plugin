@@ -166,53 +166,52 @@ below the current directory. You never need to be in a special directory.
 ## CLI output contract
 
 The last line(s) of appato commands are machine-readable — space-separated
-`key=value` pairs. Parse them with the per-field quoting and absent-value
-rules in the schema reference below; don't scrape the human-readable lines
-above them. The narrative list after the reference explains what each
-result means.
+`key=value` pairs. Parse them; don't scrape the human-readable lines above
+them. The compact reference lists each label and its fields; the narrative
+below explains what the important results mean.
 
 <!-- machine-contract:start -->
-| Token | Fields in wire order | Valid field shapes |
-| --- | --- | --- |
-| `APPATO_APP` | `app` (string, raw); `dir` (string, JSON-quoted; absent=`none`) | `app` `dir` |
-| `APPATO_CLONED` | `app` (string, raw); `version` (integer, raw); `dir` (string, JSON-quoted); `url` (string, raw); `existing` (boolean, raw) | `app` `dir` `existing`<br>`app` `version` `dir` `url` |
-| `APPATO_CREATED` | `app` (string, raw); `dir` (string, JSON-quoted); `url` (string, raw) | `app` `dir` `url` |
-| `APPATO_CRON` | `name` (string, JSON-quoted); `schedule` (string, JSON-quoted); `tz` (string, raw; absent=`UTC`); `paused` (boolean, raw); `paused_by` (string, raw; absent=`none`); `next_at` (integer, raw; absent=`none`); `failures` (integer, raw); `last_status` (string, raw; absent=`never`) | `name` `schedule` `tz` `paused` `paused_by` `next_at` `failures` `last_status` |
-| `APPATO_CRON_PAUSED` | `app` (string, raw); `name` (string, JSON-quoted) | `app` `name` |
-| `APPATO_CRON_RESUMED` | `app` (string, raw); `name` (string, JSON-quoted) | `app` `name` |
-| `APPATO_CRON_RUN` | `app` (string, raw); `name` (string, JSON-quoted); `status` (string, raw); `http` (integer, raw; absent=`none`); `duration_ms` (integer, raw; absent=`0`); `error` (string, JSON-quoted; absent=`""`); `output` (string, JSON-quoted; absent=`""`) | `app` `name` `status` `http` `duration_ms` `error` `output` |
-| `APPATO_CRONS` | `app` (string, raw); `count` (integer, raw); `suspended` (boolean, raw) | `app` `count` `suspended` |
-| `APPATO_DATA` | `app` (string, raw); `tables` (integer, raw); `kv_shared` (integer, raw); `kv_readonly` (integer, raw); `kv_internal` (integer, raw); `people` (integer, raw); `size_bytes` (integer, raw); `sessions` (integer, raw) | `app` `tables` `kv_shared` `kv_readonly` `kv_internal` `people` `size_bytes` `sessions` |
-| `APPATO_DELETED` | `app` (string, raw) | `app` |
-| `APPATO_DEPLOY_FAILED` | `app` (string, raw); `version` (integer, raw); `sha` (string, raw); `error` (string, JSON-quoted; absent=`"unknown"`) | `app` `version` `sha` `error`<br>`app` `version` `error` |
-| `APPATO_DEPLOYED` | `app` (string, raw); `version` (integer, raw); `sha` (string, raw); `url` (string, raw) | `app` `version` `sha` `url` |
-| `APPATO_FILE` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `found` (boolean, raw); `size` (integer, raw); `type` (string, JSON-quoted); `by` (string, JSON-quoted; absent=`null`); `at` (integer, raw) | `key` `size` `type` `by` `at`<br>`app` `scope` `key` `found` |
-| `APPATO_FILE_DELETED` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `existed` (boolean, raw) | `app` `scope` `key` `existed` |
-| `APPATO_FILE_LIST` | `app` (string, raw); `scope` (string, raw); `user` (string, raw; absent=`none`); `prefix` (string, JSON-quoted); `count` (integer, raw); `truncated` (boolean, raw) | `app` `scope` `user` `prefix` `count` `truncated` |
-| `APPATO_FILE_PUT` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `size` (integer, raw); `type` (string, JSON-quoted) | `app` `scope` `key` `size` `type` |
-| `APPATO_FILE_SAVED` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `size` (integer, raw); `type` (string, JSON-quoted); `to` (string, JSON-quoted; absent=`stdout`) | `app` `scope` `key` `size` `type` `to` |
-| `APPATO_FILES` | `app` (string, raw); `shared` (integer, raw); `readonly` (integer, raw); `internal` (integer, raw); `people` (integer, raw); `total` (integer, raw); `bytes` (integer, raw) | `app` `shared` `readonly` `internal` `people` `total` `bytes` |
-| `APPATO_INSTALLED` | `version` (string, raw); `path` (string, JSON-quoted) | `version` `path` |
-| `APPATO_KEY` | `key` (string, JSON-quoted); `by` (string, JSON-quoted; absent=`null`); `at` (integer, raw) | `key` `by` `at` |
-| `APPATO_KEYS` | `app` (string, raw); `scope` (string, raw); `user` (string, raw; absent=`none`); `prefix` (string, JSON-quoted); `count` (integer, raw); `truncated` (boolean, raw) | `app` `scope` `user` `prefix` `count` `truncated` |
-| `APPATO_KV` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `found` (boolean, raw); `by` (string, JSON-quoted; absent=`null`); `at` (integer, raw) | `app` `scope` `key` `found`<br>`app` `scope` `key` `found` `by` `at` |
-| `APPATO_KV_DELETED` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted); `existed` (boolean, raw) | `app` `scope` `key` `existed` |
-| `APPATO_KV_SET` | `app` (string, raw); `scope` (string, raw); `key` (string, JSON-quoted) | `app` `scope` `key` |
-| `APPATO_LOGIN_PENDING` | `url` (string, raw); `expires_at` (integer, raw) | `url` `expires_at` |
-| `APPATO_LOGS` | `app` (string, raw); `deployed_version` (integer, raw; absent=`none`); `window_since` (integer, raw); `entries` (integer, raw); `errors` (integer, raw); `error_groups` (integer, raw); `stale_errors` (integer, raw); `dropped` (integer, raw); `client_dropped` (integer, raw); `truncated` (boolean, raw) | `app` `deployed_version` `window_since` `entries` `errors` `error_groups` `stale_errors` `dropped` `client_dropped` `truncated` |
-| `APPATO_LOGS_CONSOLE` | `app` (string, raw); `window_since` (integer, raw); `entries` (integer, raw) | `app` `window_since` `entries` |
-| `APPATO_PAUSED` | `app` (string, raw) | `app` |
-| `APPATO_RESTORED` | `app` (string, raw); `url` (string, raw; absent=`none`) | `app` `url` |
-| `APPATO_RESUMED` | `app` (string, raw); `url` (string, raw; absent=`none`) | `app` `url` |
-| `APPATO_ROLLED_BACK` | `app` (string, raw); `version` (integer, raw); `restored` (integer, raw); `url` (string, raw) | `app` `version` `restored` `url` |
-| `APPATO_SHOW` | `app` (string, raw); `version` (integer, raw); `files` (integer, raw) | `app` `version` `files` |
-| `APPATO_SQL` | `app` (string, raw); `rows` (integer, raw); `rows_read` (integer, raw); `rows_written` (integer, raw); `truncated` (boolean, raw); `write` (boolean, raw) | `app` `rows` `rows_read` `rows_written` `truncated` `write` |
-| `APPATO_STATUS` | `app` (string, raw); `deployed_version` (integer, raw; absent=`none`); `deployed_at` (integer, raw; absent=`never`); `dirty` (boolean, raw); `state` (string, raw); `status` (string, raw; absent=`active`); `deletes_at` (integer, raw; absent=`none`); `sha` (string, raw); `url` (string, raw) | `app` `deployed_version` `deployed_at` `dirty` `state` `status` `deletes_at` `sha` `url` |
-| `APPATO_SYNC_BLOCKED` | `app` (string, raw); `latest_version` (integer, raw); `local_sha` (string, raw) | `app` `latest_version` `local_sha` |
-| `APPATO_SYNCED` | `app` (string, raw); `version` (integer, raw); `changed` (boolean, raw); `files` (integer, raw); `sha` (string, raw) | `app` `version` `changed` `sha`<br>`app` `version` `changed` `files` `sha` |
-| `APPATO_TABLE` | `name` (string, JSON-quoted); `rows` (integer, raw); `cols` (string, JSON-quoted) | `name` `rows` `cols` |
-| `APPATO_TRASHED` | `app` (string, raw); `deletes_at` (integer, raw; absent=`none`) | `app` `deletes_at` |
-| `APPATO_WORKSPACE` | `org` (string, raw); `scope` (string, raw); `apps` (integer, raw); `checked_out` (integer, raw) | `org` `scope` `apps` `checked_out` |
+| Token | Fields in wire order |
+| --- | --- |
+| `APPATO_APP` | `app` `dir` |
+| `APPATO_CLONED` | `app` `version` `dir` `url` `existing` |
+| `APPATO_CREATED` | `app` `dir` `url` |
+| `APPATO_CRON` | `name` `schedule` `tz` `paused` `paused_by` `next_at` `failures` `last_status` |
+| `APPATO_CRON_PAUSED` | `app` `name` |
+| `APPATO_CRON_RESUMED` | `app` `name` |
+| `APPATO_CRON_RUN` | `app` `name` `status` `http` `duration_ms` `error` `output` |
+| `APPATO_CRONS` | `app` `count` `suspended` |
+| `APPATO_DATA` | `app` `tables` `kv_shared` `kv_readonly` `kv_internal` `people` `size_bytes` `sessions` |
+| `APPATO_DELETED` | `app` |
+| `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
+| `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
+| `APPATO_FILE` | `app` `scope` `key` `found` `size` `type` `by` `at` |
+| `APPATO_FILE_DELETED` | `app` `scope` `key` `existed` |
+| `APPATO_FILE_LIST` | `app` `scope` `user` `prefix` `count` `truncated` |
+| `APPATO_FILE_PUT` | `app` `scope` `key` `size` `type` |
+| `APPATO_FILE_SAVED` | `app` `scope` `key` `size` `type` `to` |
+| `APPATO_FILES` | `app` `shared` `readonly` `internal` `people` `total` `bytes` |
+| `APPATO_INSTALLED` | `version` `path` |
+| `APPATO_KEY` | `key` `by` `at` |
+| `APPATO_KEYS` | `app` `scope` `user` `prefix` `count` `truncated` |
+| `APPATO_KV` | `app` `scope` `key` `found` `by` `at` |
+| `APPATO_KV_DELETED` | `app` `scope` `key` `existed` |
+| `APPATO_KV_SET` | `app` `scope` `key` |
+| `APPATO_LOGIN_PENDING` | `url` `expires_at` |
+| `APPATO_LOGS` | `app` `deployed_version` `window_since` `entries` `errors` `error_groups` `stale_errors` `dropped` `client_dropped` `truncated` |
+| `APPATO_LOGS_CONSOLE` | `app` `window_since` `entries` |
+| `APPATO_PAUSED` | `app` |
+| `APPATO_RESTORED` | `app` `url` |
+| `APPATO_RESUMED` | `app` `url` |
+| `APPATO_ROLLED_BACK` | `app` `version` `restored` `url` |
+| `APPATO_SHOW` | `app` `version` `files` |
+| `APPATO_SQL` | `app` `rows` `rows_read` `rows_written` `truncated` `write` |
+| `APPATO_STATUS` | `app` `deployed_version` `deployed_at` `dirty` `state` `status` `deletes_at` `sha` `url` |
+| `APPATO_SYNC_BLOCKED` | `app` `latest_version` `local_sha` |
+| `APPATO_SYNCED` | `app` `version` `changed` `files` `sha` |
+| `APPATO_TABLE` | `name` `rows` `cols` |
+| `APPATO_TRASHED` | `app` `deletes_at` |
+| `APPATO_WORKSPACE` | `org` `scope` `apps` `checked_out` |
 <!-- machine-contract:end -->
 
 - `APPATO_DEPLOYED app=<org>/<slug> version=<n> sha=<12-hex> url=<url>` —

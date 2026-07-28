@@ -3,7 +3,8 @@
 The distributable bundle installed into users' coding agents:
 
 - `skills/appato/SKILL.md` — the workflow (open agent-skills standard; loaded
-  by both Claude Code and Codex)
+  by both Claude Code and Codex). Its marked machine-contract reference is
+  generated from `cli/src/machine.mjs` by `npm run build:plugin-skill`.
 - `bin/appato` + `bin/appato.mjs` — the CLI. Claude Code (>=2.1.91) puts
   plugin `bin/` on the Bash tool's PATH, so `appato` is a bare command with
   no install step; the `.mjs` is generated from `cli/src/` by `npm run
