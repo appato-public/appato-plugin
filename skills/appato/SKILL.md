@@ -218,6 +218,9 @@ below explains what the important results mean.
 | `APPATO_SYNCED` | `app` `version` `changed` `files` `sha` |
 | `APPATO_TABLE` | `name` `rows` `cols` |
 | `APPATO_TRASHED` | `app` `deletes_at` |
+| `APPATO_WEBHOOK` | `app` `label` `url` `created_at` `created` |
+| `APPATO_WEBHOOK_DELETED` | `app` `label` |
+| `APPATO_WEBHOOKS` | `app` `count` |
 | `APPATO_WORKSPACE` | `org` `scope` `apps` `checked_out` |
 <!-- machine-contract:end -->
 
@@ -304,6 +307,14 @@ below explains what the important results mean.
   `APPATO_CRON_RESUMED app=<org>/<slug> name=<json-string>` — result of `appato
   cron pause|resume <name>`. Pausing is runtime state that survives
   pushes: a later deploy will NOT silently resume a paused schedule.
+- `APPATO_WEBHOOK app=<org>/<slug> label=<json-string> url=<json-string>
+  created_at=<ms> [created=<true|false>]` — one provisioned capability.
+  `created` appears after `webhook create`; false means the existing URL was
+  returned idempotently. Treat `url` as a secret and load the
+  `appato-webhooks` skill before implementing or configuring it.
+- `APPATO_WEBHOOKS app=<org>/<slug> count=<n>` follows the per-hook lines from
+  `appato webhook`. `APPATO_WEBHOOK_DELETED app=<org>/<slug>
+  label=<json-string>` confirms immediate revocation.
 - `APPATO_LOGS app=<org>/<slug> deployed_version=<n|none> window_since=<ms>
   entries=<n> errors=<n> error_groups=<n> stale_errors=<n> dropped=<n>
   client_dropped=<n> truncated=<true|false>` — printed by `appato logs`.

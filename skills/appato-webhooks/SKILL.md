@@ -1,113 +1,129 @@
 ---
 name: appato-webhooks
-description: Add public inbound HTTP webhook endpoints to an Appato app with the injected Worker SDK. Use only when an Appato app must receive third-party callbacks, event deliveries, verification challenges, or other requests that cannot use Appato member SSO. Do not use for ordinary authenticated app routes, outbound HTTP calls, scheduled jobs, browser realtime, or general Appato development.
+description: Provision and implement public inbound HTTP webhooks for an Appato app. Use when an app must receive third-party callbacks, event deliveries, verification challenges, or any request that cannot use Appato member SSO. Covers requesting opaque URLs by label, handleWebhook(), sender verification, testing, rotation, and revocation. Do not use for ordinary authenticated app routes, outbound HTTP calls, scheduled jobs, browser realtime, or general Appato development.
 ---
 
 # Appato webhooks
 
-Use this together with the `appato` skill. The normal Appato workflow still
-owns checkout, editing, pushing, and log inspection; this skill only defines
-the inbound webhook contract.
+Use this together with the `appato` skill. The normal Appato workflow owns
+checkout, editing, pushing, and logs. This skill owns the public webhook
+capability and its code handler.
 
-## Register routes
+## Request the webhook first
 
-Register webhook routes at module scope in `index.ts`. Registration is local
-to the deployed Worker: it creates no platform configuration or durable route
-state.
+Every webhook must be provisioned by a builder before it can receive traffic.
+From inside the app checkout, choose a descriptive lowercase `snake_case`
+label and run:
+
+```sh
+appato webhook create slack_message
+```
+
+The command is idempotent. It returns the same URL if the label already
+exists and ends with:
+
+```text
+APPATO_WEBHOOK app=<org>/<app> label="slack_message" url="https://<app>-<org>.hooks.appato.app/<opaque-id>" created_at=<ms> created=<true|false>
+```
+
+Use the returned URL exactly when configuring the provider. Never construct,
+guess, or derive it. The 43-character path is a cryptographically random
+capability and should be handled like a secret: do not put it in app source,
+screenshots, issue text, logs, or chat unless the user explicitly needs it.
+The platform deliberately does not put that id in the app's request or durable
+logs.
+
+Useful operations:
+
+```sh
+appato webhook                 # list labels and URLs
+appato webhook --json          # structured list
+appato webhook delete <label>  # revoke immediately
+```
+
+At most 64 webhooks may be provisioned per app. Labels begin with a letter,
+contain only lowercase letters, digits, and underscores, and are at most 48
+characters. Prefer one label per provider/integration or independent failure
+domain, such as `github_push`, `slack_events`, or `stripe_accounting`.
+
+Deleting a label invalidates its URL immediately. Recreating that label mints
+a different URL, which is the rotation procedure; update the provider with
+the new URL. Provisioned webhooks survive code pushes and rollbacks, and are
+deleted with the app.
+
+## Register the label in code
+
+Register the matching label at module scope in `index.ts`:
 
 ```ts
-import { webhooks } from "./_appato.js";
+import { handleWebhook } from "./_appato.js";
 
-webhooks.post("/events/:eventId", async (request, env, ctx, params) => {
+handleWebhook("slack_message", async (request, env, ctx) => {
   const rawBody = await request.arrayBuffer();
-  // Verify the sender against the untouched bytes before parsing or acting.
-  // Then parse, process, and return exactly the response the sender expects.
-  return new Response(JSON.stringify({ accepted: params.eventId }), {
-    status: 202,
-    headers: { "content-type": "application/json" },
-  });
+  // Verify the sender against these exact bytes before parsing or acting.
+  // Then parse/process and return exactly what the provider expects.
+  return new Response("accepted", { status: 202 });
 });
 ```
 
-The public endpoint is:
+`handleWebhook(label, handler)` creates no URL. The CLI provisioning step
+creates the public capability; the label is the stable join between platform
+state and deployed code. A provisioned label with no registered handler
+returns `404`. A code handler whose label has not been provisioned is
+unreachable.
 
-```text
-https://<app>-<org>.hooks.appato.app/events/<eventId>
-```
+The handler accepts every HTTP method at its one URL. Providers may send GET,
+POST, PUT, PATCH, DELETE, HEAD, or OPTIONS; branch on `request.method` when a
+protocol needs different behavior. Query parameters, headers, and body are
+preserved. The request pathname presented to the handler is `/`; there are no
+public subpaths or route parameters. Use separate labeled webhooks or query/
+body values when a provider needs distinct event routing.
 
-Available registration methods are `get`, `post`, `put`, `patch`, `delete`,
-`head`, `options`, and `all`.
-
-Patterns support:
-
-- Exact paths: `/events`
-- Named segments: `/events/:eventId`, available as `params.eventId`
-- A terminal catchall: `/callbacks/*`, available as `params["*"]`
-
-Prefer the narrowest method and path. Use `all` or a catchall only when the
-external protocol or runtime-generated callback paths require it. Ambiguous
-patterns for the same method are rejected. Registration freezes when the
-first webhook request is dispatched, so never register or remove routes from
-inside a request handler. For per-user integrations, use a named segment or
-catchall and resolve that identifier through app storage; do not create one
-route per user at request time.
-
-An unregistered path or method returns `404`. It never falls through to the
-app's normal `fetch` handler or static files. The hooks hostname is a separate
-public ingress; the authenticated app remains at its normal `appato.app`
-hostname: `https://<app>-<org>.appato.app`.
+Registration freezes on the first dispatch. Register only at module scope,
+never inside `fetch` or another handler. Duplicate or invalid labels fail
+deployment/runtime initialization.
 
 ## Handle raw HTTP
 
-The handler receives `(request, env, ctx, params)` and must return a
-`Response`. Treat it as a normal Worker request:
+The handler receives `(request, env, ctx)` and must return a `Response`:
 
-- Read headers, query parameters, and the raw body from `request`.
 - Read the body only once. If verification and parsing both need it, buffer
-  once with `arrayBuffer()` and derive both operations from those exact bytes.
-- Return the exact status, body, content type, and redirect headers required
-  by the external protocol.
-- Use `ctx.waitUntil(...)` for safe follow-up work after a prompt
-  acknowledgement when the external protocol does not require synchronous
-  results.
-- Design side effects to be idempotent. External senders commonly retry the
-  same delivery.
+  once with `arrayBuffer()` and derive both from those exact bytes.
+- Return the exact status, body, content type, and redirect headers the
+  provider requires, including verification challenges.
+- Use `ctx.waitUntil(...)` only for safe follow-up work after a prompt
+  acknowledgement when synchronous results are not required.
+- Make side effects idempotent; webhook senders commonly retry deliveries.
 
-Appato preserves the handler's response except that it removes `Set-Cookie`
-and internal `x-appato-*` headers, forces `Cache-Control: no-store`, and does
-not permit WebSocket upgrades or `101` responses.
+Appato preserves the response except that it removes `Set-Cookie` and
+internal `x-appato-*` headers, forces `Cache-Control: no-store`, and rejects
+WebSocket upgrades and `101` responses.
 
-## Authenticate in the handler
+## Authenticate the sender
 
-The hooks gateway intentionally performs no member SSO and no
-provider-specific verification. Route registration selects traffic; it is
-not authentication. `getUser(request)` has no signed-in user on this ingress.
+The opaque URL reduces discovery and accidental cross-routing, but it is not
+a substitute for provider authentication. The gateway performs no member SSO
+or provider-specific verification, and `getUser(request)` has no signed-in
+user on webhook ingress.
 
-Implement the sender's authentication protocol in the handler before parsing
-or causing side effects. Preserve these invariants:
+Implement the provider protocol in the handler before parsing or causing side
+effects:
 
 - Verify signatures against the exact raw request bytes.
-- Apply the protocol's timestamp or nonce replay checks when it defines them.
+- Enforce timestamp, nonce, and replay rules when the protocol defines them.
 - Compare secret tokens in constant time where the runtime permits.
-- Never log credentials, authorization headers, signatures, full request
-  bodies, or verification material.
-- Never commit a secret to app files. If the required credential is not
-  available through the Appato runtime, stop and tell the user that secure
-  verification needs secret-storage support.
+- Never log credentials, authorization headers, signatures, complete bodies,
+  challenge secrets, or the public webhook URL.
+- Never commit a provider secret to app files. If secure runtime secret
+  storage is unavailable for the required credential, stop and tell the user.
 
-Provider adapters are deliberately not part of Appato V1. Write only the
-verification and response behavior required by the external protocol being
-integrated; do not add provider-specific platform code.
+## Verify before finishing
 
-## Platform limits and diagnostics
+Request/list the label, push the code, configure the exact returned URL at the
+provider, and send a safe representative request including any challenge
+flow. Then run `appato logs --source webhook`; do not declare the integration
+healthy from a successful push alone.
 
-- Request body limit: 5 MiB.
-- Coarse abuse brake: approximately 1,000 requests per minute per app per
-  Cloudflare location. It is not an exact global quota.
-- Webhook requests are metered separately and appear in `appato logs` with
-  source `webhook` (`Webhooks` in the console UI).
-- Platform-generated `429`, `500`, and `503` responses include retry-oriented
-  semantics; external senders may retry them.
-
-After pushing, exercise the registered path with a safe representative
-request and run `appato logs` before declaring the integration healthy.
+Limits: 5 MiB request body; coarse abuse brake around 1,000 requests/minute
+per app per Cloudflare location. Platform `429`, `500`, and `503` responses
+are retry-oriented and providers may retry them.

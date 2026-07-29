@@ -336,6 +336,21 @@ const MACHINE_LINE_CONTRACT = {
     machineString("cols", "json"),
   ]),
   APPATO_TRASHED: machineLine([machineString("app"), machineInteger("deletes_at", "none")]),
+  APPATO_WEBHOOK: machineLine(
+    [
+      machineString("app"),
+      machineString("label", "json"),
+      machineString("url", "json"),
+      machineInteger("created_at"),
+      machineBoolean("created"),
+    ],
+    [
+      ["app", "label", "url", "created_at"],
+      ["app", "label", "url", "created_at", "created"],
+    ],
+  ),
+  APPATO_WEBHOOK_DELETED: machineLine([machineString("app"), machineString("label", "json")]),
+  APPATO_WEBHOOKS: machineLine([machineString("app"), machineInteger("count")]),
   APPATO_WORKSPACE: machineLine([
     machineString("org"),
     machineString("scope"),
@@ -444,6 +459,11 @@ usage:
   appato cron pause|resume <name>
                             stop/restart a schedule (schedules themselves are
                             declared in appato.json)
+  appato webhook [--json]   list provisioned webhook labels and secret URLs
+  appato webhook create <label>
+                            request an opaque public URL for a snake_case label
+  appato webhook delete <label>
+                            revoke the URL immediately (recreate to rotate it)
   appato data               what the app has stored: tables, keys per scope,
                             people with personal data, size, live sessions
   appato data ls [prefix] [--scope shared|readonly|internal|mine] [--user <id|email>]
@@ -619,6 +639,30 @@ FILES (uploads) — the SAME scopes, a second verb set, backed by R2
       if (!dm || (me.id !== dm.from && me.id !== dm.to)) return new Response("no", { status: 403 });
       return (await files.internal.get(dm.fileKey)) ?? new Response("gone", { status: 404 });
     }
+
+WEBHOOKS — provision an opaque public URL, then handle its stable label
+  Request/list/revoke from the app checkout:
+    appato webhook create slack_message
+    appato webhook
+    appato webhook delete slack_message
+
+  Use the exact returned https://<app>-<org>.hooks.appato.app/<opaque-id>
+  URL at the provider. Treat it as a secret capability; never derive it,
+  commit it to app code, or log it. Register the LABEL at module scope:
+
+    import { handleWebhook } from "./_appato.js";
+    handleWebhook("slack_message", async (request, env, ctx) => {
+      const bytes = await request.arrayBuffer();
+      // Verify provider signature/challenge against the exact bytes first.
+      return new Response("ok", { status: 202 });
+    });
+
+  Every HTTP method is delivered to the same handler. Method, query, headers,
+  and body are preserved; the handler pathname is "/". The opaque URL is not
+  sender authentication — implement the provider's signature/HMAC, timestamp,
+  replay, and challenge protocol. Delete revokes immediately; recreate rotates.
+  Limits: 64 hooks/app, 5MiB/request. For the full contract, load the
+  appato-webhooks skill.
 
 THREE TIERS — picking the right one matters
   storage   persisted        messages, votes, rows, settings
@@ -2503,6 +2547,83 @@ async function filesRm(org, app, key, scope, user) {
 }
 
 // ---------------------------------------------------------------------------
+// cli/src/webhook.mjs
+
+/**
+ * Provisioned public capabilities. Labels are the stable code contract; URLs
+ * are secret values minted and revoked by the platform.
+ */
+async function webhook(args = []) {
+  const { org, app } = appConfig();
+  const positional = args.filter((a) => !a.startsWith("-"));
+  const [sub = "list", label] = positional;
+  const base = `/api/apps/${org}/${app}/webhooks`;
+
+  if (sub === "create" || sub === "request") {
+    if (!label) throw new Error(`usage: appato webhook ${sub} <label>`);
+    const res = await apiFetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    const body = /** @type {Wire<WebhookCreated>} */ (await res.json());
+    if (!res.ok) throw new Error(body.error || `webhook request failed (${res.status})`);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(body));
+      return;
+    }
+    console.log(
+      `${body.created ? "✓ provisioned" : "✓ already provisioned"} "${body.label}"\n${body.url}`,
+    );
+    emit("APPATO_WEBHOOK", {
+      app: `${org}/${app}`,
+      label: body.label,
+      url: body.url,
+      created_at: body.createdAt,
+      created: body.created,
+    });
+    return;
+  }
+
+  if (sub === "delete" || sub === "rm" || sub === "revoke") {
+    if (!label) throw new Error(`usage: appato webhook ${sub} <label>`);
+    const res = await apiFetch(`${base}/${encodeURIComponent(label)}`, { method: "DELETE" });
+    const body = /** @type {Wire<{ ok: true; deleted: true }>} */ (await res.json());
+    if (!res.ok) throw new Error(body.error || `webhook revoke failed (${res.status})`);
+    console.log(`✓ revoked "${label}"`);
+    emit("APPATO_WEBHOOK_DELETED", { app: `${org}/${app}`, label });
+    return;
+  }
+
+  if (sub !== "list") {
+    throw new Error(
+      `unknown webhook command "${sub}" — use: list | create <label> | delete <label>`,
+    );
+  }
+  const res = await apiFetch(base);
+  const body = /** @type {Wire<WebhookList>} */ (await res.json());
+  if (!res.ok) throw new Error(body.error || `webhook list failed (${res.status})`);
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  if (body.webhooks.length === 0) {
+    console.log(`No webhooks. Request one with: appato webhook create <label>`);
+  } else {
+    for (const hook of body.webhooks) {
+      console.log(`${hook.label}  ${hook.url}`);
+      emit("APPATO_WEBHOOK", {
+        app: `${org}/${app}`,
+        label: hook.label,
+        url: hook.url,
+        created_at: hook.createdAt,
+      });
+    }
+  }
+  emit("APPATO_WEBHOOKS", { app: `${org}/${app}`, count: body.webhooks.length });
+}
+
+// ---------------------------------------------------------------------------
 // cli/src/logs.mjs
 
 /** Client↔server join: one story when a browser fetch and server error share a rid.
@@ -3310,6 +3431,10 @@ try {
       break;
     case "files":
       await files(args);
+      break;
+    case "webhook":
+    case "webhooks":
+      await webhook(args);
       break;
     case "rollback":
       await rollback(args);
