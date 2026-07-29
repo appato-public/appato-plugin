@@ -350,6 +350,9 @@ below explains what the important results mean.
   `page.html` at `/page`), shadowing your fetch handler for that path.
 - `./_appato.js` is injected by the platform at deploy time — import it, but
   never create that file.
+- If the app must receive public third-party callbacks that cannot use member
+  SSO, also load the `appato-webhooks` skill. Keep webhook mechanics out of
+  ordinary authenticated `fetch` routes.
 - For state, use the built-in storage + realtime APIs (next section). Do not
   call external databases unless the user provides one.
 - The `/_appato/*` URL path is reserved by the platform — your fetch handler

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Appato Webhooks"
+  short_description: "Add inbound HTTP webhooks to Appato apps"
+  default_prompt: "Use $appato-webhooks to add an authenticated inbound webhook to this Appato app."

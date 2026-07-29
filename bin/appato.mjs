@@ -2510,7 +2510,11 @@ async function filesRm(org, app, key, scope, user) {
 function serverErrorsByRid(events) {
   const m = new Map();
   for (const e of events) {
-    if (e.rid && e.level === "error" && (e.source === "http" || e.source === "app")) {
+    if (
+      e.rid &&
+      e.level === "error" &&
+      (e.source === "http" || e.source === "webhook" || e.source === "app")
+    ) {
       m.set(e.rid, e);
     }
   }
