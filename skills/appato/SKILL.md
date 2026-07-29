@@ -8,9 +8,9 @@ allowed-tools: Bash(appato *)
 
 appato hosts small internal-only web apps for the user's company. You write
 the code locally; the `appato` CLI deploys it. Apps are live at
-`https://<app>-<org>.appato.app` and are only reachable by signed-in
-members of the user's company — never build login screens; the platform
-handles auth.
+`https://<app>-<org>.appato.app` and are reachable only by signed-in
+workspace members allowed by that app's workspace/restricted/private access
+policy — never build login screens; the platform handles auth.
 
 ## How apps live on disk
 
@@ -22,11 +22,12 @@ works — including a subdir of an existing project).
 
 The platform is the source of truth: every push is an immutable version, so
 local directories are disposable working copies. `appato clone` re-creates
-any app anywhere; `appato sync` updates a copy to the latest version.
+an app the caller may build; `appato sync` updates a copy to the latest
+version.
 
 The CLI anchors itself: inside an app (any depth), commands act on that app;
-outside, `appato status` lists the org's apps and which are checked out
-below the current directory. You never need to be in a special directory.
+outside, `appato status` lists apps the caller may build and which are checked
+out below the current directory. You never need to be in a special directory.
 
 ## Workflow
 
@@ -64,13 +65,15 @@ below the current directory. You never need to be in a special directory.
    on their shell PATH) to run in their own terminal and continue once
    they confirm.
 2. **Orient**: run `appato status` before anything else. Outside an app it
-   lists the user's own apps and which are checked out below the current
-   directory (`--all` lists the whole org — use it when looking for a
-   coworker's app); inside an app it reports deploy state and whether the
-   local copy is current. Use this to decide between the paths below — and
-   to avoid creating a duplicate of an app the user already has.
-3. **Existing app?** If it isn't checked out here, run
-   `appato clone <slug>` (creates `./<slug>/`). If it is, **run
+   lists apps the user may currently build and which are checked out below
+   the current directory. `--all` is the member-safe app directory: use it
+   to avoid duplicates or find an app whose use/build access the user should
+   request, but do not clone a directory-only row. Inside an app, status
+   reports deploy state and whether the local copy is current.
+3. **Existing buildable app?** If it appears in the default status list but
+   isn't checked out here, run `appato clone <slug>` (creates `./<slug>/`).
+   If it appears only under `--all`, direct the user to request app-builder
+   access in the console first. If it is checked out, **run
    `appato sync` inside it before editing** so you work on the latest
    version — others (or the user's other machines) may have pushed since.
    If sync reports `APPATO_SYNC_BLOCKED`, the local copy has unpushed
@@ -192,6 +195,7 @@ below explains what the important results mean.
 | `APPATO_DELETED` | `app` |
 | `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
 | `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
+| `APPATO_ERROR` | `code` `message` `action_url` |
 | `APPATO_FILE` | `app` `scope` `key` `found` `size` `type` `by` `at` |
 | `APPATO_FILE_DELETED` | `app` `scope` `key` `existed` |
 | `APPATO_FILE_LIST` | `app` `scope` `user` `prefix` `count` `truncated` |
@@ -261,8 +265,9 @@ below explains what the important results mean.
 - `APPATO_WORKSPACE org=<org> scope=<mine|all> apps=<n> checked_out=<n>`
   followed by one `APPATO_APP app=<org>/<slug> dir=<"./dir"|none>` per app
   — printed by `status` when outside any app directory. `scope=mine` means
-  only the user's own apps are listed (plus local checkouts); rerun with
-  `--all` for the org-wide list.
+  only apps the user may currently build are listed (plus local checkouts);
+  `scope=all` is the sanitized member directory and does not imply clone or
+  technical access.
 - `APPATO_CREATED app=<org>/<slug> dir=<json-string> url=<url>` — app
   created; its directory is `dir`.
 - `APPATO_CLONED app=<org>/<slug> version=<n> dir=<json-string> url=<url>`

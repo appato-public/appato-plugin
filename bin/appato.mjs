@@ -94,6 +94,13 @@ const machineLine = (fields, variants = [fields.map((field) => field.name)]) => 
 });
 
 const MACHINE_LINE_CONTRACT = {
+  APPATO_ERROR: machineLine(
+    [machineString("code"), machineString("message", "json"), machineString("action_url", "json")],
+    [
+      ["code", "message"],
+      ["code", "message", "action_url"],
+    ],
+  ),
   APPATO_APP: machineLine([machineString("app"), machineString("dir", "json", "none")]),
   APPATO_CLONED: machineLine(
     [
@@ -413,6 +420,19 @@ function formatMachineLine(token, values) {
 /** Emit one contract-owned line. `stderr` keeps streamed file bytes on stdout pure. */
 function emit(token, values, stderr = false) {
   (stderr ? console.error : console.log)(formatMachineLine(token, values));
+}
+
+/** Preserve a server refusal's stable code/action in both human and machine output. */
+function apiResponseError(body, fallback) {
+  const message = typeof body?.error === "string" && body.error ? body.error : fallback;
+  const actionUrl =
+    typeof body?.actionUrl === "string" && body.actionUrl ? body.actionUrl : undefined;
+  const error = /** @type {Error & {apiCode?: string, actionUrl?: string}} */ (
+    new Error(actionUrl ? `${message}\nnext: ${actionUrl}` : message)
+  );
+  if (typeof body?.code === "string" && body.code) error.apiCode = body.code;
+  if (actionUrl) error.actionUrl = actionUrl;
+  return error;
 }
 
 // ---------------------------------------------------------------------------
@@ -943,7 +963,7 @@ async function findVersionBySha(org, app, sha) {
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
     const body = /** @type {Wire<VersionsPage>} */ (await res.json());
-    if (!res.ok) throw new Error(body.error || `couldn't read versions (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `couldn't read versions (${res.status})`);
     const match = body.versions.find((v) => v.sha === sha);
     if (match) return match;
     cursor = body.nextBefore ?? 0;
@@ -978,7 +998,7 @@ function writeManifestMeta(root, { title, description, crons }) {
 async function fetchAppState(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}`);
   const body = /** @type {Wire<AppDetail>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `couldn't read ${org}/${app} (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `couldn't read ${org}/${app} (${res.status})`);
   return body;
 }
 
@@ -1138,7 +1158,7 @@ async function create(args) {
     }),
   });
   const body = /** @type {Wire<CreateApp>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `create failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `create failed (${res.status})`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, "appato.json"),
@@ -1218,7 +1238,7 @@ async function clone(args) {
       `no app "${slug}" in ${org} — run \`appato status --all\` to list the org's apps`,
     );
   }
-  if (!stateRes.ok) throw new Error(state.error || `clone failed (${stateRes.status})`);
+  if (!stateRes.ok) throw apiResponseError(state, `clone failed (${stateRes.status})`);
 
   // The file set comes from a specific VERSION's manifest (--version) or the
   // latest one; either way contents come one raw fetch per path, addressed
@@ -1235,7 +1255,7 @@ async function clone(args) {
     const fres = await apiFetch(`/api/apps/${org}/${slug}/versions/${version}/files`);
     const fbody = /** @type {Wire<VersionFiles>} */ (await fres.json());
     // A walled or missing version surfaces the server's 404 message as-is.
-    if (!fres.ok) throw new Error(fbody.error || `clone failed (${fres.status})`);
+    if (!fres.ok) throw apiResponseError(fbody, `clone failed (${fres.status})`);
     for (const f of fbody.files) incoming[f.path] = await fetchFile(org, slug, f.path, f.sha256);
     // C1: this version's own schedules. null means the row predates schedule
     // recording ("unknown") — and the CLI wire cannot say "unknown": push
@@ -1332,7 +1352,7 @@ async function show(args = []) {
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
     const body = /** @type {Wire<VersionsPage>} */ (await res.json());
-    if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `show failed (${res.status})`);
     if (versionArg === null) {
       meta = body.versions[0];
       break;
@@ -1347,7 +1367,7 @@ async function show(args = []) {
   const res = await apiFetch(`/api/apps/${org}/${app}/versions/${id}/files`);
   const body = /** @type {Wire<VersionFiles>} */ (await res.json());
   // A walled or missing version surfaces the server's 404 message as-is.
-  if (!res.ok) throw new Error(body.error || `show failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `show failed (${res.status})`);
 
   if (filePath) {
     const entry = body.files.find((f) => f.path === filePath);
@@ -1439,7 +1459,7 @@ async function history(args = []) {
       `/api/apps/${org}/${app}/versions${cursor ? `?before=${cursor}` : ""}`,
     );
     const body = /** @type {Wire<VersionsPage>} */ (await res.json());
-    if (!res.ok) throw new Error(body.error || `history failed (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `history failed (${res.status})`);
     versions.push(...body.versions);
     truncated = !all && !!body.nextBefore;
     cursor = all ? (body.nextBefore ?? 0) : 0;
@@ -1492,7 +1512,7 @@ async function rollback(args = []) {
     });
     process.exit(2);
   }
-  if (!res.ok) throw new Error(body.error || `rollback failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `rollback failed (${res.status})`);
   // `restored` is the version that authored the content — it differs from
   // the target when the target was itself a rollback (server resolves to
   // the origin so rollback chains never form).
@@ -1585,7 +1605,7 @@ async function push(args = []) {
     });
     process.exit(2);
   }
-  if (!res.ok) throw new Error(body.error || `push failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `push failed (${res.status})`);
   console.log(`✓ deployed v${body.version} → ${body.url}`);
   emit("APPATO_DEPLOYED", {
     app: `${org}/${app}`,
@@ -1711,7 +1731,7 @@ async function pause() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/pause`, { method: "POST" });
   const body = /** @type {Wire<AppPaused>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `pause failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `pause failed (${res.status})`);
   console.log(`✓ paused ${org}/${app} — offline, data frozen. Resume with: appato resume`);
   emit("APPATO_PAUSED", { app: `${org}/${app}` });
 }
@@ -1724,7 +1744,7 @@ async function resume() {
   // read below live on one arm only, so a plain `any` avoids a spurious
   // union-narrowing error — deliberately looser per the spec's escape hatch.
   const body = /** @type {any} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `resume failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `resume failed (${res.status})`);
   // The API answers 200 with the redeploy's outcome in the body: a failed
   // redeploy means the app is active but still offline (no script, schedules
   // suspended) — that is not a resume, so no APPATO_RESUMED.
@@ -1746,7 +1766,7 @@ async function trash() {
   const { org, app } = appConfig();
   const res = await apiFetch(`/api/apps/${org}/${app}/trash`, { method: "POST" });
   const body = /** @type {Wire<AppTrashed>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `trash failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `trash failed (${res.status})`);
   console.log(`✓ moved ${org}/${app} to the trash — offline, frozen. Restore with: appato restore`);
   emit("APPATO_TRASHED", { app: `${org}/${app}`, deletes_at: body.deletesAt });
 }
@@ -1758,7 +1778,7 @@ async function restore() {
   // 200 body is the same active-with/without-version union as resume — `any`
   // for the same reason (fields read live on one arm only).
   const body = /** @type {any} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `restore failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `restore failed (${res.status})`);
   // A failed redeploy leaves the app active-but-offline (same shape as resume) —
   // that is not a clean restore, so no APPATO_RESTORED.
   if (body.deployStatus === "error") {
@@ -1799,7 +1819,7 @@ async function deleteForever(args = []) {
   const org = flagValue(args, "--org") || (await defaultOrg());
   const res = await apiFetch(`/api/apps/${org}/${slug}`, { method: "DELETE" });
   const body = /** @type {Wire<AppDeleted>} */ (await res.json().catch(() => ({})));
-  if (!res.ok) throw new Error(body.error || `delete failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `delete failed (${res.status})`);
   console.log(`✓ deleted ${org}/${slug} forever`);
   emit("APPATO_DELETED", { app: `${org}/${slug}` });
 }
@@ -1827,7 +1847,7 @@ async function cron(args = []) {
     const res = await apiFetch(`/api/apps/${org}/${app}/crons/${name}/${sub}`, { method: "POST" });
     // run yields a CronRun; pause/resume only read `error` here, which Wire adds.
     const body = /** @type {Wire<CronRun>} */ (await res.json());
-    if (res.status === 404) throw new Error(body.error || `no cron "${name}" in appato.json`);
+    if (res.status === 404) throw apiResponseError(body, `no cron "${name}" in appato.json`);
     if (sub === "run") {
       const ok = res.ok && body.status === "ok";
       const detail = body.error ? ` — ${body.error}` : "";
@@ -1851,7 +1871,7 @@ async function cron(args = []) {
       if (!ok) process.exit(2);
       return;
     }
-    if (!res.ok) throw new Error(body.error || `cron ${sub} failed (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `cron ${sub} failed (${res.status})`);
     console.log(`✓ ${sub}d "${name}"`);
     emit(sub === "pause" ? "APPATO_CRON_PAUSED" : "APPATO_CRON_RESUMED", {
       app: `${org}/${app}`,
@@ -1862,7 +1882,7 @@ async function cron(args = []) {
 
   const res = await apiFetch(`/api/apps/${org}/${app}/crons`);
   const body = /** @type {Wire<CronList>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `cron list failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `cron list failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
     return;
@@ -1991,7 +2011,7 @@ async function data(args = []) {
 async function fetchDataOverview(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/data`);
   const body = /** @type {Wire<DataOverview>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `data overview failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `data overview failed (${res.status})`);
   return body;
 }
 
@@ -2059,7 +2079,7 @@ async function dataLs(org, app, prefix, scope, user) {
   if (prefix) params.set("prefix", prefix);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
   const body = /** @type {Wire<DataKvPage>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `data ls failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `data ls failed (${res.status})`);
   for (const e of body.entries) {
     console.log(`${e.key}  ${e.by ? e.by.name : "app server"}  ${ago(e.at)}`);
   }
@@ -2089,7 +2109,7 @@ async function dataGet(org, app, key, scope, user) {
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`);
   const body = /** @type {Wire<DataKvPage>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `data get failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `data get failed (${res.status})`);
   const hit = body.entries.find((e) => e.key === key);
   if (!hit) {
     console.error(`no key ${JSON.stringify(key)} in ${scope}`);
@@ -2122,7 +2142,7 @@ async function dataSet(org, app, key, rawValue, scope, user) {
     body: JSON.stringify({ scope, ...(user ? { user } : {}), key, value }),
   });
   const body = /** @type {Wire<DataKvPut>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `data set failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `data set failed (${res.status})`);
   console.log(`✓ set ${scope}:${key}`);
   emit("APPATO_KV_SET", { app: `${org}/${app}`, scope, key });
 }
@@ -2132,7 +2152,7 @@ async function dataRm(org, app, key, scope, user) {
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/data/kv?${params}`, { method: "DELETE" });
   const body = /** @type {Wire<DataKvDelete>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `data rm failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `data rm failed (${res.status})`);
   console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
   emit("APPATO_KV_DELETED", {
     app: `${org}/${app}`,
@@ -2150,7 +2170,7 @@ async function postDataSql(org, app, query, write) {
     body: JSON.stringify({ query, write }),
   });
   const body = /** @type {Wire<SqlResult>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `sql failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `sql failed (${res.status})`);
   return body;
 }
 
@@ -2354,7 +2374,7 @@ async function files(args = []) {
 async function fetchFilesOverview(org, app) {
   const res = await apiFetch(`/api/apps/${org}/${app}/files`);
   const body = /** @type {Wire<FilesOverview>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `files overview failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `files overview failed (${res.status})`);
   return body;
 }
 
@@ -2413,7 +2433,7 @@ async function filesLs(org, app, prefix, scope, user) {
   if (prefix) params.set("prefix", prefix);
   const res = await apiFetch(`/api/apps/${org}/${app}/files/ls?${params}`);
   const body = /** @type {Wire<FilesPage>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `files ls failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `files ls failed (${res.status})`);
   for (const f of body.files) {
     console.log(
       `${f.key}  ${formatBytes(f.size)}  ${f.contentType}  ${f.by ? f.by.name : "app server"}  ${f.at ? ago(f.at) : "—"}`,
@@ -2461,7 +2481,7 @@ async function filesGet(org, app, key, scope, user, outPath) {
   if (!res.ok) {
     // File bytes (GET /file) are out of the typed scope; only the error is read.
     const body = /** @type {any} */ (await res.json().catch(() => ({})));
-    throw new Error(body.error || `files get failed (${res.status})`);
+    throw apiResponseError(body, `files get failed (${res.status})`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
   const type = res.headers.get("content-type") || "application/octet-stream";
@@ -2520,7 +2540,7 @@ async function filesPut(org, app, path, key, scope, user, type) {
   });
   // Blob upload (PUT /file) is out of the typed scope; only the error is read.
   const resBody = /** @type {any} */ (await res.json().catch(() => ({})));
-  if (!res.ok) throw new Error(resBody.error || `files put failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(resBody, `files put failed (${res.status})`);
   console.log(`✓ uploaded ${scope}:${name} (${formatBytes(body.length)})`);
   emit("APPATO_FILE_PUT", {
     app: `${org}/${app}`,
@@ -2536,7 +2556,7 @@ async function filesRm(org, app, key, scope, user) {
   if (user) params.set("user", user);
   const res = await apiFetch(`/api/apps/${org}/${app}/files/file?${params}`, { method: "DELETE" });
   const body = /** @type {Wire<FileDelete>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `files rm failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `files rm failed (${res.status})`);
   console.log(body.deleted ? `✓ deleted ${scope}:${key}` : `${scope}:${key} did not exist`);
   emit("APPATO_FILE_DELETED", {
     app: `${org}/${app}`,
@@ -2567,7 +2587,7 @@ async function webhook(args = []) {
       body: JSON.stringify({ label }),
     });
     const body = /** @type {Wire<WebhookCreated>} */ (await res.json());
-    if (!res.ok) throw new Error(body.error || `webhook request failed (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `webhook request failed (${res.status})`);
     if (args.includes("--json")) {
       console.log(JSON.stringify(body));
       return;
@@ -2589,7 +2609,7 @@ async function webhook(args = []) {
     if (!label) throw new Error(`usage: appato webhook ${sub} <label>`);
     const res = await apiFetch(`${base}/${encodeURIComponent(label)}`, { method: "DELETE" });
     const body = /** @type {Wire<{ ok: true; deleted: true }>} */ (await res.json());
-    if (!res.ok) throw new Error(body.error || `webhook revoke failed (${res.status})`);
+    if (!res.ok) throw apiResponseError(body, `webhook revoke failed (${res.status})`);
     console.log(`✓ revoked "${label}"`);
     emit("APPATO_WEBHOOK_DELETED", { app: `${org}/${app}`, label });
     return;
@@ -2602,7 +2622,7 @@ async function webhook(args = []) {
   }
   const res = await apiFetch(base);
   const body = /** @type {Wire<WebhookList>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `webhook list failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `webhook list failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
     return;
@@ -2700,7 +2720,7 @@ async function logs(args = []) {
   const qs = params.toString();
   const res = await apiFetch(`/api/apps/${org}/${app}/logs${qs ? `?${qs}` : ""}`);
   const body = /** @type {Wire<AppLogs>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `logs failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `logs failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
     return;
@@ -2802,7 +2822,7 @@ async function consoleLogs(args) {
   if (n) params.set("limit", n);
   const res = await apiFetch(`/api/apps/${org}/${app}/logs/console?${params}`);
   const body = /** @type {Wire<ConsoleLogs>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `console logs failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `console logs failed (${res.status})`);
   if (args.includes("--json")) {
     console.log(JSON.stringify(body));
     return;
@@ -2844,7 +2864,7 @@ async function status(args = []) {
     fetchManifest(org, app),
   ]);
   const body = /** @type {Wire<AppDetail>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `status failed (${res.status})`);
   const local = collectFiles(root);
   const localBinHashes = binaryHashes(local.binary);
   const localSha = localSetSha(local.files, localBinHashes);
@@ -2927,13 +2947,12 @@ async function status(args = []) {
 
 /**
  * `status` outside any app: the caller's own apps (orgs can be huge, so the
- * full list is opt-in via --all) + every checkout one level down, whoever
- * created it.
+ * full list is opt-in via --all) + every checkout one level down.
  */
 async function workspaceStatus(json = false, all = false) {
   const res = await apiFetch(`/api/apps${all ? "" : "?mine=1"}`);
   const body = /** @type {Wire<AppList>} */ (await res.json());
-  if (!res.ok) throw new Error(body.error || `status failed (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `status failed (${res.status})`);
   const local = scanChildApps(process.cwd());
   const localByApp = new Map(local.map((c) => [`${c.org}/${c.app}`, c.dir]));
   const apps = body.apps.map((a) => ({
@@ -2946,7 +2965,7 @@ async function workspaceStatus(json = false, all = false) {
   const listed = new Set(apps.map((a) => a.slug));
   for (const c of local) {
     if (c.org === body.org && !listed.has(c.app)) {
-      apps.push({ slug: c.app, title: "(created by someone else)", dir: c.dir });
+      apps.push({ slug: c.app, title: "(not in your current app-builder grants)", dir: c.dir });
     }
   }
   const scope = all ? "all" : "mine";
@@ -2958,7 +2977,7 @@ async function workspaceStatus(json = false, all = false) {
     console.log(
       all
         ? `No apps in ${body.org} yet — start one: appato create <slug> --title "..." --description "..."`
-        : `No apps of yours in ${body.org} yet — create one, or \`appato status --all\` to see everyone's.`,
+        : `You aren't an active builder on any apps in ${body.org} — request an app grant, create one, or use \`appato status --all\` for the member directory.`,
     );
   } else {
     console.log(
@@ -2968,10 +2987,13 @@ async function workspaceStatus(json = false, all = false) {
       console.log(
         a.dir
           ? `  ● ${a.slug}  ${a.title}  → ./${a.dir}/`
-          : `  ○ ${a.slug}  ${a.title}  (appato clone ${a.slug})`,
+          : all
+            ? `  ○ ${a.slug}  ${a.title}  (directory only — request app-builder access in the console to clone)`
+            : `  ○ ${a.slug}  ${a.title}  (appato clone ${a.slug})`,
       );
     }
-    if (!all) console.log(`(yours only — \`appato status --all\` lists the whole org)`);
+    if (!all)
+      console.log(`(apps you may build — \`appato status --all\` lists the member directory)`);
   }
   emit("APPATO_WORKSPACE", {
     org: body.org,
@@ -3198,7 +3220,7 @@ async function fetchManifest(org, app) {
       `no app "${app}" in ${org} — it may have been deleted or renamed. Run \`appato status --all\` to list the org's apps.`,
     );
   }
-  if (!res.ok) throw new Error(body.error || `could not read ${org}/${app} (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `could not read ${org}/${app} (${res.status})`);
   return body;
 }
 
@@ -3301,7 +3323,7 @@ async function fetchFile(org, app, path, sha256) {
   );
   if (!res.ok) {
     const body = /** @type {any} */ (await res.json().catch(() => ({})));
-    throw new Error(body.error || `could not fetch ${path} (${res.status})`);
+    throw apiResponseError(body, `could not fetch ${path} (${res.status})`);
   }
   // Version-skew tolerance: a not-yet-propagated pre-0.7 server answers
   // JSON `{content}`; the current wire is raw octet-stream. Without this
@@ -3327,7 +3349,7 @@ async function putBlob(org, app, path, bytes) {
     body: bytes,
   });
   const body = /** @type {any} */ (await res.json().catch(() => ({})));
-  if (!res.ok) throw new Error(body.error || `could not upload ${path} (${res.status})`);
+  if (!res.ok) throw apiResponseError(body, `could not upload ${path} (${res.status})`);
   return body.sha256;
 }
 
@@ -3480,6 +3502,17 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (err) {
+  if (err?.apiCode) {
+    emit(
+      "APPATO_ERROR",
+      {
+        code: err.apiCode,
+        message: err.message,
+        ...(err.actionUrl ? { action_url: err.actionUrl } : {}),
+      },
+      true,
+    );
+  }
   console.error(`error: ${err.message}`);
   process.exit(1);
 }
