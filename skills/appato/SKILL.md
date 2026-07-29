@@ -8,7 +8,7 @@ allowed-tools: Bash(appato *)
 
 appato hosts small internal-only web apps for the user's company. You write
 the code locally; the `appato` CLI deploys it. Apps are live at
-`https://<org>-<app>.apps.appato.com` and are only reachable by signed-in
+`https://<app>-<org>.appato.app` and are only reachable by signed-in
 members of the user's company — never build login screens; the platform
 handles auth.
 

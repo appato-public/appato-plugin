@@ -32,7 +32,7 @@ webhooks.post("/events/:eventId", async (request, env, ctx, params) => {
 The public endpoint is:
 
 ```text
-https://<org>-<app>.hooks.appato.com/events/<eventId>
+https://<app>-<org>.hooks.appato.app/events/<eventId>
 ```
 
 Available registration methods are `get`, `post`, `put`, `patch`, `delete`,
@@ -54,8 +54,8 @@ route per user at request time.
 
 An unregistered path or method returns `404`. It never falls through to the
 app's normal `fetch` handler or static files. The hooks hostname is a separate
-public ingress; the authenticated app remains at its normal `apps.appato.com`
-hostname.
+public ingress; the authenticated app remains at its normal `appato.app`
+hostname: `https://<app>-<org>.appato.app`.
 
 ## Handle raw HTTP
 
