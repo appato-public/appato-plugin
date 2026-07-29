@@ -419,7 +419,8 @@ usage:
                             (--all: every app in the org)
   appato create <slug> --title "..." --description "..."  [--org <slug>]
                             [--emoji "📦"] [--label "Stock"]
-                            create an app in a new ./<slug>/ directory
+                            create an app in ./<slug>/, adopting an existing
+                            local manifest without dropping any fields
                             (--emoji: 1–2 emoji · --label: ≤8-char icon label)
   appato clone <slug> [dir] [--org <slug>] [--version <n>]
                             check out an existing app into ./<slug>/
@@ -995,6 +996,25 @@ function isEmojiGrapheme(s) {
   );
 }
 
+/**
+ * A checkout may be authored before its server app exists, or it may outlive
+ * a deleted server app, or it may be copied from another checkout as a
+ * starting point. Read the whole manifest so declarations and future fields
+ * survive; create canonicalizes the duplicated identity/metadata fields after
+ * the server accepts the new app. Returning null keeps unrelated non-empty
+ * directories behind the existing refusal.
+ */
+function incomingManifest(dir) {
+  const path = join(dir, "appato.json");
+  if (!existsSync(path)) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(path, "utf8"));
+    return manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : null;
+  } catch {
+    return null;
+  }
+}
+
 async function create(args) {
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
@@ -1005,7 +1025,7 @@ async function create(args) {
   const slug = positionals[0];
   const title = flagValue(args, "--title");
   const description = flagValue(args, "--description");
-  const org = flagValue(args, "--org");
+  const orgFlag = flagValue(args, "--org");
   if (!slug || !title || !description) {
     throw new Error(
       'usage: appato create <slug> --title "Human Title" --description "One or two sentences: what the app does and who it\'s for" [--emoji "📦"] [--label "Stock"] [--org <org>]',
@@ -1034,22 +1054,38 @@ async function create(args) {
     console.error(`! --label is ${graphemes(label).length} graphemes; the server truncates to 8`);
   }
   const inside = findAppRoot();
+  let dir;
+  let localManifest = null;
   if (inside) {
-    throw new Error(
-      `already inside an appato app (${inside}) — apps don't nest; cd out and create it as a sibling`,
-    );
-  }
-  // Directory = bare app slug. If cwd is already named after the app (the
-  // "mkdir first" habit), use it; otherwise create ./<slug>/.
-  const dir = basename(process.cwd()) === slug ? process.cwd() : join(process.cwd(), slug);
-  if (dir !== process.cwd() && existsSync(dir) && readdirSync(dir).length > 0) {
-    throw new Error(`./${slug}/ already exists and is not empty`);
+    // Adopt the checkout without moving its files aside when the command
+    // clearly targets this root: either its current manifest already names
+    // the slug, or the directory was renamed to the requested slug after
+    // being copied. From a nested source directory, "create" is still much
+    // more likely to mean an accidental nested app.
+    localManifest = inside === process.cwd() ? incomingManifest(inside) : null;
+    if (!localManifest || (localManifest.app !== slug && basename(process.cwd()) !== slug)) {
+      throw new Error(
+        `already inside an appato app (${inside}) — apps don't nest; cd out and create it as a sibling`,
+      );
+    }
+    dir = inside;
+  } else {
+    // Directory = bare app slug. If cwd is already named after the app (the
+    // "mkdir first" habit), use it; otherwise create ./<slug>/.
+    dir = basename(process.cwd()) === slug ? process.cwd() : join(process.cwd(), slug);
+    if (dir !== process.cwd() && existsSync(dir) && readdirSync(dir).length > 0) {
+      // An existing local manifest is a first-class create input. Preserve it
+      // and the source in place; an unrelated non-empty directory remains an
+      // unconditional refusal.
+      localManifest = incomingManifest(dir);
+      if (!localManifest) throw new Error(`./${slug}/ already exists and is not empty`);
+    }
   }
   const res = await apiFetch("/api/apps", {
     method: "POST",
     body: JSON.stringify({
       slug,
-      org,
+      org: orgFlag,
       title,
       description,
       ...(emoji ? { emoji } : {}),
@@ -1062,12 +1098,27 @@ async function create(args) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, "appato.json"),
-    JSON.stringify({ org: body.org, app: body.slug, title, description }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        ...(localManifest ?? {}),
+        org: body.org,
+        app: body.slug,
+        title,
+        description,
+      },
+      null,
+      2,
+    ) + "\n",
   );
   const rel = relative(process.cwd(), dir) || ".";
   console.log(
-    `Created ${body.org}/${body.slug} — "${title}" in ${rel === "." ? "this directory" : `./${rel}/`}`,
+    `Created ${body.org}/${body.slug} — "${title}" in ${
+      rel === "." ? "this directory" : `./${rel}/`
+    }`,
   );
+  if (localManifest) {
+    console.log("Preserved the existing files and appato.json declarations.");
+  }
   console.log(`URL (after first push): ${body.url}`);
   emit("APPATO_CREATED", { app: `${body.org}/${body.slug}`, dir: rel, url: body.url });
 }

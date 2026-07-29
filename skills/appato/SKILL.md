@@ -95,6 +95,13 @@ below the current directory. You never need to be in a special directory.
    The title is the human name shown in the workspace; the description is
    1–2 sentences on what the app does and who it's for — write both for the
    user's coworkers, who will discover the app with no other context.
+   If a local checkout already exists but its server app does not yet, run
+   the same `create` command from the checkout root or its parent. The CLI
+   adopts its entire `appato.json` in place, including when the checkout was
+   copied from another app; the successful create canonicalizes `org`, `app`,
+   `title`, and `description` while preserving every other field. The initial
+   push then registers its declared `crons`; no prior server-side cron state
+   is implied.
    **Always pass `--emoji` and `--label`** — they design the app's icon (no
    AI is involved; a good pick is on you):
    - `--emoji`: the single emoji that best captures the tool (`"🌴"`,
