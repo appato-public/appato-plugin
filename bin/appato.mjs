@@ -16,9 +16,12 @@
 import { execSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
   unlinkSync,
@@ -32,7 +35,7 @@ import { gzipSync } from "node:zlib";
 // ---------------------------------------------------------------------------
 // cli/src/config.mjs
 
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 
@@ -501,9 +504,11 @@ usage:
                             and its own schedules, ready to sync or push)
   appato sync [--force]     update local files to the latest pushed version
                             (refuses to discard unpushed local changes)
-  appato push -m "..." [--details "..."]
+  appato push -m "..." [--details "..."] [--model "..."]
                             upload the app and deploy; also syncs
                             title/description from appato.json
+                            (--model: model id of the coding agent driving
+                            this push, for telemetry)
   appato history [--json] [--all]  list versions with their change summaries
                             (newest 50 by default; --all walks every page
                             your plan's history window retains)
@@ -1120,6 +1125,9 @@ function rawApiFetch(cred, path, options = {}) {
   const headers = new Headers(options.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   headers.set("Authorization", `Bearer ${cred.bearer}`);
+  // Best-effort client telemetry (agent/OS/plan self-description) on every
+  // request — never collides with caller headers, so set unconditionally.
+  for (const [k, v] of Object.entries(clientHeaders())) headers.set(k, v);
   return fetch(`${cred.host}${path}`, { ...options, headers });
 }
 
@@ -1715,6 +1723,12 @@ async function show(args = []) {
 
   const s = meta?.stats;
   console.log(`v${id}  ${meta ? ago(meta.createdAt) : ""}  ${meta?.message || "(no message)"}`);
+  // Attribution (docs/CODE.md V9): who drove this push, when the server
+  // recorded it — agent always, model when present. Absent for restores and
+  // pre-feature versions.
+  if (meta?.client) {
+    console.log(`  via ${meta.client.agent}${meta.client.model ? ` · ${meta.client.model}` : ""}`);
+  }
   if (s) {
     // Same "(partial)" rule as history: capped stats total only the first
     // STATS_MAX_CHANGED files, so the line is a floor.
@@ -1856,6 +1870,9 @@ async function push(args = []) {
   const { org, app, title, description, crons, root } = appConfig();
   const message = flagValue(args, "-m") ?? flagValue(args, "--message");
   const details = flagValue(args, "--details") ?? "";
+  // Self-reported model id (telemetry only): folded into the client header, so
+  // it must be set before any request the header rides on.
+  setSelfReportedModel(flagValue(args, "--model"));
   if (!message) {
     throw new Error(
       'a change summary is required: appato push -m "one-line, user-facing summary" [--details "a short paragraph: what changed for users, why, and any notable decisions"]',
@@ -3518,6 +3535,424 @@ async function install() {
     );
   }
   emit("APPATO_INSTALLED", { version, path: wrapper });
+}
+
+// ---------------------------------------------------------------------------
+// cli/src/telemetry.mjs
+
+/**
+ * Best-effort CLI client telemetry: every request self-describes the coding
+ * agent/harness driving it (Claude Code, Codex, Cursor, …), OS/arch/node, and —
+ * where the environment reveals it — the agent version, reasoning effort, and
+ * plan tier. Purely observational: any absent/unreadable/malformed source
+ * yields an omitted field, never an error, and NOTHING here may affect a
+ * command's success. Every file read is wrapped so one bad source never voids
+ * the others, and credential files (auth.json, rollout transcripts) are read
+ * only for the single hint documented at the read site — never logged or
+ * otherwise transmitted.
+ */
+
+/**
+ * Printable-ASCII (0x20–0x7E), capped at 64 chars; empty → undefined (dropped
+ * from the header). Belt against a config/env value carrying newlines, control
+ * bytes, or unicode into a header we serialize verbatim.
+ * @param {unknown} v
+ * @returns {string | undefined}
+ */
+function clean(v) {
+  if (typeof v !== "string") return undefined;
+  let out = "";
+  for (let i = 0; i < v.length && out.length < 64; i++) {
+    const c = v.charCodeAt(i);
+    if (c >= 0x20 && c <= 0x7e) out += v[i];
+  }
+  return out.length ? out : undefined;
+}
+
+/** Read at most `max` bytes of a file into a fixed buffer (never the whole
+ * thing — these files can hold a full session transcript or private state).
+ * @param {string} path
+ * @param {number} max
+ * @returns {string} */
+function readCapped(path, max) {
+  const buf = Buffer.alloc(max);
+  const fd = openSync(path, "r");
+  let bytes = 0;
+  try {
+    bytes = readSync(fd, buf, 0, max, 0);
+  } finally {
+    closeSync(fd);
+  }
+  return buf.toString("utf8", 0, bytes);
+}
+
+/** Directory entries that are all-digits (year/month/day session dirs), sorted
+ * numerically descending; unreadable dir → []. */
+function listDescNumeric(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries.filter((e) => /^\d+$/.test(e)).sort((a, b) => Number(b) - Number(a));
+}
+
+/**
+ * Full client description for one invocation, or null under DO_NOT_TRACK.
+ * Pure-ish and injectable for tests (env object + home dir; every file path
+ * derives from these).
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [home]
+ * @returns {Record<string, string | boolean> | null}
+ */
+function detectClient(env = process.env, home = homedir()) {
+  // DO_NOT_TRACK (consoledonottrack.com): the industry opt-out. Honor it by
+  // sending NO telemetry at all — no agent detection, no config-file reads,
+  // and no X-Appato-Client header (even a coarse {v,os,arch,node} send would
+  // mint a per-user cli_client row server-side, defeating the opt-out).
+  if (env.DO_NOT_TRACK && env.DO_NOT_TRACK !== "0") return null;
+
+  /** @type {Record<string, string | boolean>} */
+  const base = {
+    v: VERSION,
+    os: process.platform,
+    arch: process.arch,
+    node: process.versions.node,
+  };
+
+  /** @type {Record<string, string | undefined>} */
+  const info = {};
+  detectAgent(info, env, home);
+  // Always-on context, regardless of agent.
+  if (env.CONDUCTOR_WORKSPACE_PATH || env.__CFBundleIdentifier === "com.conductor.app") {
+    info.harness = "conductor";
+  }
+  info.term = env.TERM_PROGRAM;
+
+  /** @type {Record<string, string | boolean>} */
+  const out = { ...base };
+  for (const key of Object.keys(info)) {
+    const c = clean(info[key]);
+    if (c !== undefined) out[key] = c;
+  }
+  if (env.CI) out.ci = true;
+  return out;
+}
+
+/**
+ * First-match-wins agent detection.
+ * @param {Record<string, string | undefined>} info
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} home
+ */
+function detectAgent(info, env, home) {
+  // Codex BEFORE Claude Code: Codex's spawn path injects CODEX_THREAD_ID per
+  // command, so when both harness markers are present the common nesting is
+  // Claude Code spawning `codex`, which then ran appato — Codex is the innermost
+  // driver actually issuing this call. The reverse nesting (Codex spawning
+  // Claude Code) is rare, so preferring Codex on a tie is right.
+  if (env.CODEX_THREAD_ID || env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED) {
+    info.agent = "codex";
+    enrichCodex(info, env, home);
+    return;
+  }
+  if (env.CLAUDECODE === "1") {
+    info.agent = "claude-code";
+    enrichClaude(info, env, home);
+    return;
+  }
+  const other = detectOther(env);
+  if (other) {
+    info.agent = other.agent;
+    if (other.agentVersion) info.agentVersion = other.agentVersion;
+  }
+}
+
+/**
+ * Codex enrichment: exact running cli version + resolved model/effort from the
+ * session rollout, configured defaults as a fallback, plan from auth.json.
+ * @param {Record<string, string | undefined>} info
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} home
+ */
+function enrichCodex(info, env, home) {
+  const codexHome = env.CODEX_HOME || join(home, ".codex");
+  // The rollout gives the EXACT running cli version + resolved session model —
+  // ~/.codex/version.json is only an update-check cache (its latest_version is
+  // NOT what's running), so never use it.
+  if (env.CODEX_THREAD_ID) {
+    try {
+      readCodexRollout(info, codexHome, env.CODEX_THREAD_ID);
+    } catch {
+      // unreadable rollout — fall through to the configured defaults
+    }
+  }
+  if (!info.model || !info.effort) {
+    try {
+      readCodexConfig(info, codexHome);
+    } catch {
+      // no/unreadable config.toml
+    }
+  }
+  try {
+    info.plan = codexPlan(codexHome);
+  } catch {
+    // no/unreadable/garbled auth.json — omit plan
+  }
+}
+
+/**
+ * Walk `sessions/<YYYY>/<MM>/<DD>/` newest-first (≤10 day-dirs total) for the
+ * rollout file whose name carries the thread id, then parse it.
+ * @param {Record<string, string | undefined>} info
+ * @param {string} codexHome
+ * @param {string} threadId
+ */
+function readCodexRollout(info, codexHome, threadId) {
+  const sessions = join(codexHome, "sessions");
+  let dayDirs = 0;
+  for (const y of listDescNumeric(sessions)) {
+    for (const m of listDescNumeric(join(sessions, y))) {
+      for (const d of listDescNumeric(join(sessions, y, m))) {
+        if (dayDirs >= 10) return;
+        dayDirs++;
+        const dir = join(sessions, y, m, d);
+        let files;
+        try {
+          files = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        // Shape: rollout-<ts>-<threadid>.jsonl
+        const match = files.find((f) => f.endsWith(".jsonl") && f.includes(threadId));
+        if (match) {
+          parseRollout(info, join(dir, match));
+          return;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Read only the FIRST 64KB of a rollout (the file can hold the whole session
+ * transcript, incl. private prompts — never read more, never log it), pull the
+ * session_meta cli_version and the first turn_context model/effort.
+ * @param {Record<string, string | undefined>} info
+ * @param {string} path
+ */
+function parseRollout(info, path) {
+  const text = readCapped(path, 65536);
+  let gotMeta = false;
+  let gotTurn = false;
+  for (const line of text.split("\n")) {
+    if (gotMeta && gotTurn) break;
+    if (!line.trim()) continue;
+    let rec;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      // A truncated final line (64KB cutoff) or a malformed record — skip it.
+      continue;
+    }
+    const payload = rec?.payload;
+    if (!payload) continue;
+    if (!gotMeta && rec.type === "session_meta") {
+      if (typeof payload.cli_version === "string") info.agentVersion = payload.cli_version;
+      gotMeta = true;
+    } else if (!gotTurn && rec.type === "turn_context") {
+      if (typeof payload.model === "string") info.model = payload.model;
+      if (typeof payload.effort === "string") info.effort = payload.effort;
+      gotTurn = true;
+    }
+  }
+}
+
+/**
+ * Configured model/effort defaults — line-anchored TOML matches, good enough
+ * when the rollout is unreadable.
+ * @param {Record<string, string | undefined>} info
+ * @param {string} codexHome
+ */
+function readCodexConfig(info, codexHome) {
+  const raw = readCapped(join(codexHome, "config.toml"), 262144);
+  if (!info.model) {
+    const m = /^\s*model\s*=\s*"([^"]*)"/m.exec(raw);
+    if (m) info.model = m[1];
+  }
+  if (!info.effort) {
+    const e = /^\s*model_reasoning_effort\s*=\s*"([^"]*)"/m.exec(raw);
+    if (e) info.effort = e[1];
+  }
+}
+
+/**
+ * Codex plan tier from auth.json. For a ChatGPT login, decode ONLY the
+ * chatgpt_plan_type claim from the id_token — the file holds bearer
+ * credentials, so nothing else is read, stored, or transmitted, and there is no
+ * signature verification (a local best-effort hint, not an authorization).
+ * @param {string} codexHome
+ * @returns {string | undefined}
+ */
+function codexPlan(codexHome) {
+  const auth = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
+  if (auth.auth_mode === "apikey") return "apikey";
+  if (auth.auth_mode === "chatgpt") {
+    const idToken = auth.tokens?.id_token;
+    if (typeof idToken !== "string") return undefined;
+    const claims = decodeJwtClaims(idToken);
+    const auth0 = claims?.["https://api.openai.com/auth"];
+    const plan = auth0?.chatgpt_plan_type;
+    // Known values include free/go/plus/pro/team/business/enterprise/edu, but
+    // pass ANY short string through raw.
+    return typeof plan === "string" ? plan : undefined;
+  }
+  return undefined;
+}
+
+/** Base64url-decode + JSON.parse a JWT's MIDDLE (claims) segment. Throws on
+ * garbage; the caller catches. */
+function decodeJwtClaims(jwt) {
+  const parts = jwt.split(".");
+  if (parts.length < 2) return undefined;
+  return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+}
+
+/**
+ * Claude Code enrichment: entrypoint, version (env-only), effort, plan tier.
+ * The current session MODEL is NOT detectable for Claude Code (no env var
+ * exists; the feature request was closed as not-planned) — it comes only from
+ * push's --model flag. Deliberately does NOT read ANTHROPIC_MODEL: that's a
+ * user-pinned override, not the running model.
+ * @param {Record<string, string | undefined>} info
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} home
+ */
+function enrichClaude(info, env, home) {
+  info.entry = env.CLAUDE_CODE_ENTRYPOINT;
+  info.agentVersion = claudeVersion(env);
+  info.effort = env.CLAUDE_EFFORT;
+  try {
+    info.plan = claudePlan(env, home);
+  } catch {
+    // missing/oversized/malformed .claude.json — omit plan
+  }
+}
+
+/**
+ * Claude Code's running version, when the environment reveals it. Only
+ * version-per-directory installs (e.g. Conductor's binary manager, which puts
+ * the version in the exec path or AI_AGENT) expose it — a plain npm/homebrew
+ * install has NO version anywhere in env, so undefined (unknown) is the honest
+ * common case, not a bug.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string | undefined}
+ */
+function claudeVersion(env) {
+  if (typeof env.CLAUDE_CODE_EXECPATH === "string") {
+    const m = /\d+\.\d+\.\d+/.exec(env.CLAUDE_CODE_EXECPATH);
+    if (m) return m[0];
+  }
+  if (typeof env.AI_AGENT === "string") {
+    const m = /^claude-code_([\d-]+)_agent$/.exec(env.AI_AGENT);
+    if (m) return m[1].replace(/-/g, ".");
+  }
+  return undefined;
+}
+
+/**
+ * Claude Code plan tier from ~/.claude.json's oauthAccount block.
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} home
+ * @returns {string | undefined}
+ */
+function claudePlan(env, home) {
+  const path = join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  // The file holds per-project state and can grow to several MB — statSync and
+  // skip anything large rather than JSON.parse a huge blob on every request.
+  if (statSync(path).size > 20 * 1024 * 1024) return undefined;
+  const conf = JSON.parse(readFileSync(path, "utf8"));
+  const acct = conf?.oauthAccount;
+  if (!acct) return undefined;
+  // Raw strings, never mapped/normalized: the full value enum is unverified
+  // (e.g. "default_claude_max_20x", "claude_max") and the block can be absent
+  // even for a valid session → omit.
+  const plan = acct.organizationRateLimitTier || acct.organizationType || acct.billingType;
+  return typeof plan === "string" ? plan : undefined;
+}
+
+/**
+ * Name-only detection for the other agents (no enrichment). GitHub Copilot has
+ * no env marker — undetectable, falls through.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{ agent: string, agentVersion?: string } | null}
+ */
+function detectOther(env) {
+  if (env.CURSOR_AGENT || env.CURSOR_TRACE_ID) return { agent: "cursor" };
+  if (env.GEMINI_CLI) return { agent: "gemini-cli" };
+  if (env.AGENT === "amp") return { agent: "amp" };
+  if (env.GOOSE_TERMINAL || env.AGENT === "goose") return { agent: "goose" };
+  if (env.CLINE_ACTIVE) return { agent: "cline" };
+  if (env.OPENCODE_CLIENT || env.OPENCODE) return { agent: "opencode" };
+  if (env.TRAE_AI_SHELL_ID) return { agent: "trae" };
+  if (typeof env.AI_AGENT === "string") {
+    const m = /^([a-z0-9-]+)_([\d-]+)_agent$/i.exec(env.AI_AGENT);
+    if (m) return { agent: m[1], agentVersion: m[2].replace(/-/g, ".") };
+  }
+  return null;
+}
+
+/** @type {Record<string, string | boolean> | null | undefined} */
+let clientInfoMemo;
+
+/** Memoized detectClient() — detection is env/disk state, stable per process.
+ * Null = the user opted out (DO_NOT_TRACK).
+ * @returns {Record<string, string | boolean> | null} */
+function clientInfo() {
+  if (clientInfoMemo === undefined) clientInfoMemo = detectClient();
+  return clientInfoMemo;
+}
+
+/** @type {string | undefined} */
+let selfReportedModel;
+
+/** Push's --model flag: the model id the agent self-reports it's running as.
+ * Fills/overrides the header `model` field on subsequent clientHeaders() calls.
+ * @param {string | undefined} model */
+function setSelfReportedModel(model) {
+  selfReportedModel = model;
+}
+
+/** The request headers. The plain User-Agent is ordinary HTTP and always
+ * present; X-Appato-Client (the telemetry) is ABSENT entirely under
+ * DO_NOT_TRACK — any send at all would mint a server-side cli_client row for
+ * an opted-out user. Never collides with caller headers.
+ * @returns {{ "User-Agent": string, "X-Appato-Client"?: string }} */
+function clientHeaders() {
+  const ua =
+    "appato-cli/" +
+    VERSION +
+    " (" +
+    process.platform +
+    "; " +
+    process.arch +
+    ") node/" +
+    process.versions.node;
+  const detected = clientInfo();
+  if (detected === null) return { "User-Agent": ua };
+  /** @type {Record<string, string | boolean>} */
+  const info = { ...detected };
+  if (selfReportedModel) {
+    const c = clean(selfReportedModel);
+    if (c !== undefined) info.model = c;
+  }
+  const client = JSON.stringify(info);
+  // Field caps keep this well under 1KB; belt-and-braces, if it somehow blows
+  // past 2KB drop the header outright (same reasoning as the opt-out: a
+  // coarse-only row is worse than no row).
+  if (client.length > 2048) return { "User-Agent": ua };
+  return { "User-Agent": ua, "X-Appato-Client": client };
 }
 
 // ---------------------------------------------------------------------------

@@ -149,9 +149,12 @@ out below the current directory. You never need to be in a special directory.
 5. **Write code** (conventions below), then push and share the printed URL
    with the user.
 6. **Push frequently, always with a change summary.** Run
-   `appato push -m "<one-liner>" --details "<paragraph>"` whenever you
+   `appato push -m "<one-liner>" --details "<paragraph>" --model "<model-id>"`
+   whenever you
    finish a change — after each feature, fix, or edit batch, not just at
-   the end. Push is fast and idempotent; treat it like saving.
+   the end. Push is fast and idempotent; treat it like saving. For
+   `--model`, pass the exact model id you are running as (e.g.
+   `claude-opus-5`, `gpt-5.6-sol`); omit it if unknown.
    - `-m`: imperative, ≤ 72 chars, in user-facing language ("Add CSV export
      to the report page"), never internal jargon ("refactor helpers").
    - `--details`: 2–4 sentences — what changed for the app's users, why,
