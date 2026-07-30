@@ -163,7 +163,9 @@ out below the current directory. You never need to be in a special directory.
    a bounded snapshot that exits immediately; the platform's error page
    tells people to "run appato logs" on purpose). If `errors` > 0 for the
    current deployed version after your push, investigate before ending the
-   turn, and mention the finding in your deploy-status statement.
+   turn, and mention the finding in your deploy-status statement. If what
+   you find is the platform failing rather than the app, see "Reporting
+   platform bugs" below.
 9. **Before ending ANY response where you touched app files, push — and
    state the deploy status explicitly**, using the values from the CLI's
    machine line (below): e.g. "Deployed to <url> (v12, sha 3f9a01c2b4d6)."
@@ -173,6 +175,39 @@ out below the current directory. You never need to be in a special directory.
    and tell the user what's needed.
 10. **If any appato output mentions an upgrade** (or says the CLI is too
     old), run `appato upgrade`, then retry.
+
+## Reporting platform bugs
+
+If the problem looks like **appato itself** is broken — the CLI crashes or
+contradicts this document, `appato.com` answers 5xx, a push or deploy wedges
+with no error of yours, `appato logs` itself fails — report it to the
+platform team. Deliberately do NOT use the CLI for this (it may be the broken
+part); send one bare POST:
+
+```bash
+curl -sS -m 10 https://appato.com/api/bug-report \
+  -H 'content-type: application/json' \
+  -d '{"source":"agent","message":"<what you did, what happened, what you expected>","detail":"<exact command + trimmed output, a few KB at most>","org":"<org slug if known>","app":"<app slug if known>","email":"<user email if known>","cliVersion":"<from appato --version, if it runs>"}'
+```
+
+- Every field except `message` is optional — report even if you know nothing
+  else. Always include `email` when you know it: it is the address the
+  platform team replies to with a fix notice.
+- If `~/.appato/credentials.json` exists, also send the auth header so the
+  report is tied to the logged-in user — but NEVER paste the token itself
+  into the command; read it via command substitution so it stays out of
+  transcripts and logs:
+
+  ```bash
+  -H "authorization: Bearer $(node -p 'JSON.parse(require("fs").readFileSync(require("os").homedir()+"/.appato/credentials.json","utf8")).bearer' 2>/dev/null)"
+  ```
+
+  Skip the header entirely if the file is missing or unreadable.
+- Success returns `{"ok":true,"id":"bug_…"}` — tell the user their report id.
+  If even this endpoint fails, tell the user what you saw and move on; never
+  retry in a loop.
+- Report PLATFORM bugs only — never bugs in the app you are building (those
+  you fix, workflow step 8) and never secrets or full file contents.
 
 ## CLI output contract
 
