@@ -102,7 +102,8 @@ out below the current directory. You never need to be in a special directory.
    the same `create` command from the checkout root or its parent. The CLI
    adopts its entire `appato.json` in place, including when the checkout was
    copied from another app; the successful create canonicalizes `org`, `app`,
-   `title`, and `description` while preserving every other field. The initial
+   `title`, and `description`, resets app-bound generated values, and preserves
+   unrelated custom fields. The initial
    push then registers its declared `crons`; no prior server-side cron state
    is implied.
    **Always pass `--emoji` and `--label`** — they design the app's icon (no
@@ -195,6 +196,10 @@ below explains what the important results mean.
 | `APPATO_DELETED` | `app` |
 | `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
 | `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
+| `APPATO_EMAIL` | `app` `namespace` `inbound` `outbound` `desired_inbound` `desired_outbound` |
+| `APPATO_EMAIL_MESSAGE` | `app` `id` `direction` `status` `from` `to` `subject` `occurred_at` |
+| `APPATO_EMAIL_READY` | `app` `direction` `enabled` `inbound` `outbound` |
+| `APPATO_EMAILS` | `app` `count` `next_cursor` |
 | `APPATO_ERROR` | `code` `message` `action_url` |
 | `APPATO_FILE` | `app` `scope` `key` `found` `size` `type` `by` `at` |
 | `APPATO_FILE_DELETED` | `app` `scope` `key` `existed` |

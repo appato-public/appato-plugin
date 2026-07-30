@@ -229,6 +229,36 @@ const MACHINE_LINE_CONTRACT = {
     machineString("type", "json"),
     machineString("to", "json", "stdout"),
   ]),
+  APPATO_EMAIL: machineLine([
+    machineString("app"),
+    machineString("namespace"),
+    machineString("inbound"),
+    machineString("outbound"),
+    machineBoolean("desired_inbound"),
+    machineBoolean("desired_outbound"),
+  ]),
+  APPATO_EMAIL_READY: machineLine([
+    machineString("app"),
+    machineString("direction"),
+    machineBoolean("enabled"),
+    machineString("inbound"),
+    machineString("outbound"),
+  ]),
+  APPATO_EMAILS: machineLine([
+    machineString("app"),
+    machineInteger("count"),
+    machineString("next_cursor", "json", "none"),
+  ]),
+  APPATO_EMAIL_MESSAGE: machineLine([
+    machineString("app"),
+    machineString("id"),
+    machineString("direction"),
+    machineString("status"),
+    machineString("from", "json", "none"),
+    machineString("to", "json", "none"),
+    machineString("subject", "json"),
+    machineInteger("occurred_at"),
+  ]),
   APPATO_INSTALLED: machineLine([machineString("version"), machineString("path", "json")]),
   APPATO_KEY: machineLine([
     machineString("key", "json"),
@@ -484,6 +514,16 @@ usage:
                             request an opaque public URL for a snake_case label
   appato webhook delete <label>
                             revoke the URL immediately (recreate to rotate it)
+  appato email status [--json]
+                            show the app-owned address and inbound/outbound state
+  appato email enable|disable inbound|outbound|both
+                            change explicit email capabilities and refresh
+                            their reflection in appato.json
+  appato email logs [--since <2h>] [--direction inbound|outbound]
+                            inspect metadata-only email history (also supports
+                            --status, --from, --to, --alias, --category, -n/--limit)
+  appato email get <message-id> [--body] [--json]
+                            inspect one message; bodies are opt-in
   appato data               what the app has stored: tables, keys per scope,
                             people with personal data, size, live sessions
   appato data ls [prefix] [--scope shared|readonly|internal|mine] [--user <id|email>]
@@ -683,6 +723,32 @@ WEBHOOKS — provision an opaque public URL, then handle its stable label
   replay, and challenge protocol. Delete revokes immediately; recreate rotates.
   Limits: 64 hooks/app, 5MiB/request. For the full contract, load the
   appato-webhooks skill.
+
+EMAIL — opt-in, app-owned inbound and outbound mail
+  Enable from the checkout:
+    appato email enable both
+    appato email status
+
+  The stable address is <local>@<app>-<org>.appato.app. Send one provider message per
+  recipient; Appato enforces workspace-user/claimed-domain policy, preferences,
+  suppressions, and quotas before handoff.
+
+    import { email, handleEmail } from "./_appato.js";
+    await email.send({
+      from: { local: "reports", name: "Reports" },
+      to: ["person@example.com"],
+      subject: "Report ready",
+      text: "Your report is ready.",
+      category: "transactional",
+    });
+    handleEmail("support", async (message) => {
+      // Receives support+anything@<app>-<org>.appato.app as alias "support".
+      await processSupportEmail(message);
+    });
+
+  Inbound attachments are lazy: await message.attachments[0].get() only when
+  needed. Messages and content expire after 30 days. Use "appato email logs"
+  for metadata and "appato email get <id> --body" for sensitive content.
 
 THREE TIERS — picking the right one matters
   storage   persisted        messages, votes, rows, settings
@@ -949,6 +1015,23 @@ async function fetchCrons(org, app, verb) {
   );
 }
 
+/** Current platform-owned email capability for manifest reflection. */
+async function fetchEmailCapability(org, app, verb) {
+  const res = await apiFetch(`/api/apps/${org}/${app}/email`);
+  // Older Appato deployments do not expose app-owned email yet. Keeping the
+  // reflection optional lets a new CLI sync/clone safely against them; once
+  // the endpoint exists, its server-owned desired state is written.
+  if (res.status === 404) return undefined;
+  const body = /** @type {Wire<EmailCapability>} */ (await res.json());
+  if (!res.ok) {
+    throw apiResponseError(
+      body,
+      `couldn't read ${org}/${app}'s email capability (${res.status}) while ${verb}`,
+    );
+  }
+  return body;
+}
+
 /**
  * The pushed version whose content sha matches, walking /versions pages to
  * the plan's history wall (same loop as `history --all`, stopping on a hit —
@@ -974,14 +1057,14 @@ async function findVersionBySha(org, app, sha) {
 
 /**
  * Rewrite appato.json's server-owned fields — `title`, `description`, and
- * `crons` — in place, preserving every other key (org, app, …). Returns true
- * if anything changed. All three are owned by the platform: title/description
+ * `crons`, and `email` — in place, preserving every other key (org, app, …).
+ * Returns true if anything changed. All four are owned by the platform: title/description
  * may have been edited in the console, and crons ride the version and are
  * pushed replace-all — so a stale local value would be stated back over the
  * real one on the next push. `crons` follows the same rule as before: the key
  * is deleted when the set is empty.
  */
-function writeManifestMeta(root, { title, description, crons }) {
+function writeManifestMeta(root, { title, description, crons, email }) {
   const path = join(root, "appato.json");
   const manifest = JSON.parse(readFileSync(path, "utf8"));
   const before = JSON.stringify(manifest);
@@ -989,9 +1072,26 @@ function writeManifestMeta(root, { title, description, crons }) {
   if (description !== undefined) manifest.description = description;
   if (crons.length === 0) delete manifest.crons;
   else manifest.crons = crons;
+  if (email !== undefined) {
+    manifest.email = {
+      inbound: Boolean(email.desired.inbound),
+      outbound: Boolean(email.desired.outbound),
+    };
+  }
   if (JSON.stringify(manifest) === before) return false;
   writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
   return true;
+}
+
+/** Rewrite only the platform-owned email reflection after an email command. */
+function writeManifestEmail(root, email) {
+  const path = join(root, "appato.json");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  manifest.email = {
+    inbound: Boolean(email.desired.inbound),
+    outbound: Boolean(email.desired.outbound),
+  };
+  writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
 }
 
 /** The app's registry + deploy state (GET /api/apps/{org}/{app}) — carries the
@@ -1170,6 +1270,7 @@ async function create(args) {
         app: body.slug,
         title,
         description,
+        email: { inbound: false, outbound: false },
       },
       null,
       2,
@@ -1279,6 +1380,7 @@ async function clone(args) {
     fileCount = Object.keys(man.files).length;
   }
 
+  const email = await fetchEmailCapability(org, slug, "cloning");
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, incoming);
   writeFileSync(
@@ -1290,6 +1392,14 @@ async function clone(args) {
         title: state.title || slug,
         description: state.description || "",
         ...(crons?.length ? { crons } : {}),
+        ...(email
+          ? {
+              email: {
+                inbound: email.desired.inbound,
+                outbound: email.desired.outbound,
+              },
+            }
+          : {}),
       },
       null,
       2,
@@ -1650,7 +1760,8 @@ async function sync(args = []) {
     metaChanged.push("description");
   }
   if (JSON.stringify(crons) !== JSON.stringify(localCrons ?? [])) metaChanged.push("schedules");
-  writeManifestMeta(root, { title: state.title, description: state.description, crons });
+  const email = await fetchEmailCapability(org, app, "syncing");
+  writeManifestMeta(root, { title: state.title, description: state.description, crons, email });
   if (metaChanged.length) {
     console.log(`✓ appato.json updated from the platform (${metaChanged.join(", ")})`);
   }
@@ -2644,6 +2755,157 @@ async function webhook(args = []) {
 }
 
 // ---------------------------------------------------------------------------
+// cli/src/email.mjs
+
+function printCapability(org, app, capability) {
+  console.log(`Address: ${capability.namespace}`);
+  console.log(
+    `Inbound: ${capability.state.inbound}${capability.pauseReason.inbound ? ` — ${capability.pauseReason.inbound}` : ""}`,
+  );
+  console.log(
+    `Outbound: ${capability.state.outbound}${capability.pauseReason.outbound ? ` — ${capability.pauseReason.outbound}` : ""}`,
+  );
+  if (!capability.providerAvailable && capability.providerError) {
+    console.log(`Provider: unavailable — ${capability.providerError}`);
+  }
+  emit("APPATO_EMAIL", {
+    app: `${org}/${app}`,
+    namespace: capability.namespace,
+    inbound: capability.state.inbound,
+    outbound: capability.state.outbound,
+    desired_inbound: capability.desired.inbound,
+    desired_outbound: capability.desired.outbound,
+  });
+}
+
+async function emailCommand(args = []) {
+  const { org, app, root } = appConfig();
+  const positional = args.filter(
+    (value, index) => !value.startsWith("-") && !args[index - 1]?.startsWith("-"),
+  );
+  const [sub = "status", direction] = positional;
+  const base = `/api/apps/${org}/${app}/email`;
+
+  if (sub === "enable" || sub === "disable") {
+    if (!["inbound", "outbound", "both"].includes(direction)) {
+      throw new Error(`usage: appato email ${sub} inbound|outbound|both`);
+    }
+    const res = await apiFetch(`${base}/capability`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ direction, enabled: sub === "enable" }),
+    });
+    const body = /** @type {Wire<EmailCapability>} */ (await res.json());
+    if (!res.ok) throw apiResponseError(body, `email ${sub} failed (${res.status})`);
+    writeManifestEmail(root, body);
+    console.log(
+      `✓ ${sub === "enable" ? "enabled" : "disabled"} ${direction} email for ${body.namespace}`,
+    );
+    emit("APPATO_EMAIL_READY", {
+      app: `${org}/${app}`,
+      direction,
+      enabled: sub === "enable",
+      inbound: body.state.inbound,
+      outbound: body.state.outbound,
+    });
+    return;
+  }
+
+  if (sub === "status") {
+    const res = await apiFetch(base);
+    const body = /** @type {Wire<EmailCapability>} */ (await res.json());
+    if (!res.ok) throw apiResponseError(body, `email status failed (${res.status})`);
+    writeManifestEmail(root, body);
+    if (args.includes("--json")) console.log(JSON.stringify(body));
+    else printCapability(org, app, body);
+    return;
+  }
+
+  if (sub === "logs" || sub === "list") {
+    const query = new URLSearchParams();
+    for (const [flag, key] of [
+      ["--direction", "direction"],
+      ["--status", "status"],
+      ["--from", "from"],
+      ["--to", "to"],
+      ["--alias", "alias"],
+      ["--category", "category"],
+      ["--limit", "limit"],
+      ["--cursor", "cursor"],
+    ]) {
+      const value = flagValue(args, flag);
+      if (value !== undefined) query.set(key, value);
+    }
+    const shortLimit = flagValue(args, "-n");
+    if (shortLimit !== undefined && !query.has("limit")) query.set("limit", shortLimit);
+    const since = flagValue(args, "--since");
+    if (since) query.set("after", String(parseSince(since)));
+    const res = await apiFetch(`${base}/messages?${query}`);
+    const body = /** @type {Wire<EmailMessages>} */ (await res.json());
+    if (!res.ok) throw apiResponseError(body, `email logs failed (${res.status})`);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(body));
+    } else if (!body.messages.length) {
+      console.log("No email messages in this window.");
+    } else {
+      for (const message of body.messages) {
+        console.log(
+          `${new Date(message.occurredAt).toISOString()}  ${message.direction.padEnd(8)}  ${message.state.padEnd(18)}  ${message.from ?? "—"} → ${message.to ?? "—"}  ${message.subject}`,
+        );
+        emit("APPATO_EMAIL_MESSAGE", {
+          app: `${org}/${app}`,
+          id: message.id,
+          direction: message.direction,
+          status: message.state,
+          from: message.from,
+          to: message.to,
+          subject: message.subject,
+          occurred_at: message.occurredAt,
+        });
+      }
+    }
+    emit("APPATO_EMAILS", {
+      app: `${org}/${app}`,
+      count: body.messages.length,
+      next_cursor: body.nextCursor,
+    });
+    return;
+  }
+
+  if (sub === "get") {
+    if (!direction) throw new Error("usage: appato email get <message-id> [--body] [--json]");
+    const res = await apiFetch(`${base}/messages/${encodeURIComponent(direction)}`);
+    const body = /** @type {Wire<EmailMessage>} */ (await res.json());
+    if (!res.ok) throw apiResponseError(body, `email get failed (${res.status})`);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(body));
+      return;
+    }
+    console.log(`${body.direction} ${body.state} — ${body.id}`);
+    console.log(`${body.from ?? "—"} → ${body.to ?? "—"}`);
+    console.log(`Subject: ${body.subject}`);
+    console.log(`When: ${new Date(body.occurredAt).toISOString()}`);
+    if (args.includes("--body")) {
+      console.log("");
+      console.log(body.body.text ?? body.body.html ?? "(no body)");
+    }
+    emit("APPATO_EMAIL_MESSAGE", {
+      app: `${org}/${app}`,
+      id: body.id,
+      direction: body.direction,
+      status: body.state,
+      from: body.from,
+      to: body.to,
+      subject: body.subject,
+      occurred_at: body.occurredAt,
+    });
+    return;
+  }
+
+  throw new Error(`unknown email command "${sub}" — use: status | enable | disable | logs | get`);
+}
+
+// ---------------------------------------------------------------------------
 // cli/src/logs.mjs
 
 /** Client↔server join: one story when a browser fetch and server error share a rid.
@@ -3457,6 +3719,9 @@ try {
     case "webhook":
     case "webhooks":
       await webhook(args);
+      break;
+    case "email":
+      await emailCommand(args);
       break;
     case "rollback":
       await rollback(args);
