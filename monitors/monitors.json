@@ -1,0 +1,8 @@
+[
+  {
+    "name": "appato-login",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/appato login --watch",
+    "description": "appato sign-in approval",
+    "when": "on-skill-invoke:appato"
+  }
+]

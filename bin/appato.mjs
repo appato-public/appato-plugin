@@ -298,6 +298,10 @@ const MACHINE_LINE_CONTRACT = {
     machineString("scope"),
     machineString("key", "json"),
   ]),
+  APPATO_LOGIN_COMPLETE: machineLine([
+    machineString("user", "json"),
+    machineString("orgs", "json", '""'),
+  ]),
   APPATO_LOGIN_PENDING: machineLine([machineString("url"), machineInteger("expires_at")]),
   APPATO_LOGS: machineLine([
     machineString("app"),
@@ -472,10 +476,14 @@ function usage() {
   console.log(`appato ${VERSION} — build & deploy internal utility apps
 
 usage:
-  appato login [--no-wait]  authenticate this machine (opens browser).
+  appato login [--no-wait|--watch]
+                            authenticate this machine (opens browser).
                             --no-wait exits immediately after printing the
                             approval URL; the next appato command finishes
-                            the login once you've approved
+                            the login once you've approved.
+                            --watch starts no login: it runs silently until
+                            one lands, then prints APPATO_LOGIN_COMPLETE
+                            (for agent harnesses; Ctrl-C to stop)
   appato logout             remove stored credentials
   appato whoami             show the signed-in user and orgs
   appato status [--json] [--all]
@@ -810,9 +818,11 @@ WORKFLOW
  * dying (agent Bash timeouts, closed terminals, classifier kills). Approval
  * order doesn't matter — any later appato command completes the exchange
  * via credentials(). `--no-wait` prints the approval URL and exits
- * immediately (the agent-friendly path).
+ * immediately (the agent-friendly path); `--watch` starts no login at all
+ * and only observes one landing (see watchLogin).
  */
 async function login(args = []) {
+  if (args.includes("--watch")) return watchLogin();
   const host = DEFAULT_HOST;
   let pending = readPendingLogin();
   if (!pending || pending.host !== host) {
@@ -849,8 +859,9 @@ async function login(args = []) {
   }
 
   while (Date.now() < pending.expires_at) {
-    await new Promise((r) => setTimeout(r, pending.interval * 1000));
+    await sleep(pending.interval * 1000);
     if (await exchangePendingLogin(pending)) {
+      console.log("Logged in.");
       await whoami();
       return;
     }
@@ -859,8 +870,132 @@ async function login(args = []) {
   throw new Error("login timed out — run appato login again");
 }
 
-/** One token-exchange attempt. True = logged in; false = still pending. */
+const IDLE_MS = 2000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Passive login watcher for agent harnesses — the plugin's `appato-login`
+ * monitor runs `appato login --watch` in the background so the agent is
+ * resumed the moment the user approves, with nothing to type.
+ *
+ * SILENCE IS THE CONTRACT. A monitor delivers every stdout line to the agent
+ * as an interjection, so this prints ONE line per login it observes —
+ * APPATO_LOGIN_COMPLETE, when the stored bearer changes to one it hasn't
+ * announced — and nothing else, ever: not expiry, not access_denied, not
+ * progress. Those aren't actionable mid-turn and the agent self-corrects
+ * when its next appato command reports it isn't logged in. For the same
+ * reason the loop never throws and never exits: a crashed watcher would
+ * remove the feature with no signal at all.
+ *
+ * A logout and re-login in the same session therefore announces a SECOND
+ * time, with the new identity. That is deliberate — do NOT latch this after
+ * the first announce. An identity change mid-session is the single most
+ * important thing the watcher can say, because the agent is otherwise about
+ * to keep attributing pushes to the person who signed out.
+ *
+ * The trigger is the bearer, not the mere presence of a credentials file:
+ * that token is a device-flow session and it EXPIRES, so "signed in last
+ * week, token dead, sign in again" is the mainline path — keying on
+ * absent→present would leave the watcher inert exactly there. `seen`
+ * advances on a successful announce, and also after PROBE_ATTEMPTS failed
+ * identity lookups for the same bearer: an announce whose /api/me won't
+ * answer (revoked session, network partition) carries no information, and
+ * without that give-up the watcher would hit the endpoint every tick for
+ * the rest of the session.
+ *
+ * It starts no login and never announces one that was already there. Idle
+ * cost is one local file read per tick; it reaches the network only while a
+ * device code is outstanding, plus at most PROBE_ATTEMPTS lookups per new
+ * bearer.
+ */
+async function watchLogin() {
+  let seen = storedCredentials()?.bearer ?? null;
+  let failures = 0;
+  for (;;) {
+    const pending = readPendingLogin();
+    // Either process may win this exchange — see exchangePendingLogin.
+    if (pending) await exchangePendingLogin(pending).catch(() => {});
+    const cred = storedCredentials();
+    if (cred && cred.bearer !== seen) {
+      // `seen` records the bearer we PROBED, not whatever is on disk now: a
+      // second login landing mid-probe is a separate login and gets its own
+      // announce on the next tick.
+      if (await announceLogin(cred)) {
+        seen = cred.bearer;
+        failures = 0;
+      } else if (++failures >= PROBE_ATTEMPTS) {
+        seen = cred.bearer;
+        failures = 0;
+      }
+    }
+    await sleep(pending ? pending.interval * 1000 : IDLE_MS);
+  }
+}
+
+/** Identity lookups to spend on one new bearer before giving up on it. */
+const PROBE_ATTEMPTS = 3;
+
+/**
+ * One announce attempt. True = the line was printed; false = try again.
+ *
+ * Deliberately total, and deliberately authenticating with credentials the
+ * caller already read rather than re-entering credentials() — the one
+ * helper in this file that prints to stdout, which the silence contract
+ * cannot afford on any path reachable from `login --watch`. It swallows
+ * everything else because a 200 from /api/me whose body has no `user.email`
+ * would otherwise reject out of the loop and end the watcher for the
+ * session with no signal at all.
+ */
+async function announceLogin(cred) {
+  try {
+    // Ungated on purpose — see rawApiFetch.
+    const me = await fetchMe((path) => rawApiFetch(cred, path));
+    if (!me) return false;
+    emit("APPATO_LOGIN_COMPLETE", {
+      user: me.user.email,
+      orgs: me.orgs.map((o) => o.slug).join(","),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The only outcomes that consume the device code (RFC 8628 §3.5, and what
+ * better-auth's device-authorization plugin actually returns). Anything
+ * else — a 5xx, a proxy's HTML error page parsed to `{}`, an error string
+ * we don't know — is retryable, and deleting the pending login over one
+ * gateway blip would strand the user with no way to notice.
+ */
+const TERMINAL_LOGIN_ERRORS = new Set([
+  "access_denied",
+  "expired_token",
+  "invalid_grant",
+  "invalid_request",
+  "invalid_client",
+  "unauthorized_client",
+]);
+
+/**
+ * How long to let a racing winner finish writing credentials.json. A fixed
+ * cutoff on purpose: polling until the device code's own deadline instead
+ * (the obvious "more correct" alternative) would hang a genuinely invalid
+ * code for up to the full 30-minute lifetime, trading a cosmetic error
+ * message for a wedged command. 300ms covers a local file write that
+ * follows an already-returned HTTP response with wide margin; past it the
+ * loser just prints a confusing-but-recoverable failure that its next
+ * command clears.
+ */
+const RACE_GRACE_MS = 300;
+
+/**
+ * One token-exchange attempt. True = logged in; false = keep polling.
+ * Prints nothing: the watcher shares this path and must stay silent.
+ */
 async function exchangePendingLogin(pending) {
+  const before = storedCredentials()?.bearer;
   const res = await fetch(`${pending.host}/api/auth/device/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -878,12 +1013,31 @@ async function exchangePendingLogin(pending) {
     mkdirSync(CRED_DIR, { recursive: true });
     writeFileSync(CRED_FILE, JSON.stringify(cred, null, 2), { mode: 0o600 });
     rmPendingLogin();
-    console.log("Logged in.");
     return true;
   }
   const body = /** @type {any} */ (await res.json().catch(() => ({})));
   if (body.error === "authorization_pending" || body.error === "slow_down") return false;
+  if (!TERMINAL_LOGIN_ERRORS.has(body.error)) return false;
   rmPendingLogin();
+  // A device code is single-use, and the watcher polls alongside whatever the
+  // agent runs — so the loser of that race sees a terminal error for a login
+  // that in fact succeeded. A bearer that CHANGED underneath us is that race
+  // and nothing else. Merely having credentials proves nothing: someone
+  // signed in as A who denies a login as B still has A's, and reporting that
+  // as success would announce the wrong identity for a login that failed.
+  const won = () => {
+    const after = storedCredentials()?.bearer;
+    return Boolean(after) && after !== before;
+  };
+  // The winner writes credentials.json only after ITS round trip returns, so
+  // the loser's error can arrive first. `invalid_grant` is the one error a
+  // consumed code produces, so it's the only one worth waiting out; a denial
+  // or an expiry has no winner to wait for.
+  if (won()) return true;
+  if (body.error === "invalid_grant") {
+    await sleep(RACE_GRACE_MS);
+    if (won()) return true;
+  }
   throw new Error(`login failed: ${body.error || res.status}`);
 }
 
@@ -911,17 +1065,42 @@ function logout() {
   console.log("Logged out.");
 }
 
-/** Stored credentials — or, when absent, finish a pending device login. */
-async function credentials() {
-  if (existsSync(CRED_FILE)) {
+/** Usable credentials on disk, or null — the one "am I logged in?" answer. */
+function storedCredentials() {
+  try {
     const cred = JSON.parse(readFileSync(CRED_FILE, "utf8"));
     if (cred.bearer) return cred;
+  } catch {
+    // never logged in, or logged out (logout writes `{}`)
   }
-  const pending = readPendingLogin();
+  return null;
+}
+
+/** At most one pending-login completion per process — credentials() runs on
+ * every request, so without this a command would re-POST an unapproved code
+ * once per API call, and could even switch identity between two of them. */
+let pendingSettled = false;
+
+/**
+ * Credentials for this command — completing a pending device login FIRST if
+ * one exists. Order matters: the stored bearer is a session token that
+ * expires, and the skill promises "run any appato command and it completes
+ * the login", so a stale bearer must not shadow the identity the user just
+ * approved. A hard failure falls through to whatever is stored rather than
+ * breaking a command that would otherwise have worked.
+ */
+async function credentials() {
+  const pending = pendingSettled ? null : readPendingLogin();
   if (pending) {
-    if (await exchangePendingLogin(pending)) {
-      return JSON.parse(readFileSync(CRED_FILE, "utf8"));
+    pendingSettled = true;
+    if (await exchangePendingLogin(pending).catch(() => false)) {
+      console.log("Logged in.");
+      return storedCredentials();
     }
+  }
+  const stored = storedCredentials();
+  if (stored) return stored;
+  if (pending) {
     throw new Error(
       `login pending approval — approve at ${pending.verify_url} then retry this command`,
     );
@@ -929,12 +1108,23 @@ async function credentials() {
   throw new Error("not logged in — run: appato login");
 }
 
-async function apiFetch(path, options = {}) {
-  const cred = await credentials();
+/**
+ * A request authenticated with an explicit credential and NO client-side
+ * version gate. Only the login watcher uses it, for both reasons: it holds
+ * its own credentials (so nothing on that path can re-enter the printing
+ * credentials()), and a background observer must never be silenced by a
+ * minimum-version bump it can do nothing about — the plugin ships its own
+ * CLI copy, which goes stale whenever the user hasn't updated the plugin.
+ */
+function rawApiFetch(cred, path, options = {}) {
   const headers = new Headers(options.headers);
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   headers.set("Authorization", `Bearer ${cred.bearer}`);
-  const res = await fetch(`${cred.host}${path}`, { ...options, headers });
+  return fetch(`${cred.host}${path}`, { ...options, headers });
+}
+
+async function apiFetch(path, options = {}) {
+  const res = await rawApiFetch(await credentials(), path, options);
   checkCliVersion(res);
   return res;
 }
@@ -962,30 +1152,47 @@ function semverLt(a, b) {
   return false;
 }
 
+/** The signed-in identity, or null when the server refused it. `request`
+ * selects the version gate: apiFetch for commands, rawApiFetch for the
+ * watcher's probe. */
+async function fetchMe(request = apiFetch) {
+  const res = await request("/api/me");
+  if (!res.ok) return null;
+  return /** @type {AuthContext} */ (await res.json());
+}
+
 async function whoami() {
-  const res = await apiFetch("/api/me");
-  if (!res.ok) throw new Error(`unauthorized — run: appato login`);
-  const me = /** @type {AuthContext} */ (await res.json());
+  const me = await fetchMe();
+  if (!me) throw new Error("unauthorized — run: appato login");
   console.log(`${me.user.email} (orgs: ${me.orgs.map((o) => o.slug).join(", ") || "none"})`);
 }
 
 /** First org membership — the default when --org isn't given. */
 async function defaultOrg() {
-  const res = await apiFetch("/api/me");
-  if (!res.ok) throw new Error("unauthorized — run: appato login");
-  const me = /** @type {AuthContext} */ (await res.json());
+  const me = await fetchMe();
+  if (!me) throw new Error("unauthorized — run: appato login");
   const org = me.orgs[0]?.slug;
   if (!org) throw new Error("you're not in an org yet — create one at " + DEFAULT_HOST);
   return org;
 }
 
+/**
+ * Best-effort browser open. A missing opener (headless Linux, minimal
+ * containers, bare WSL have no xdg-open) surfaces as an asynchronous
+ * `error` EVENT, not a throw — unhandled, it kills the process right after
+ * the approval URL is printed and before `--no-wait` emits its machine
+ * line. The listener is what actually makes this optional; the try/catch
+ * only covers a synchronous spawn refusal.
+ */
 function tryOpen(url) {
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   try {
-    spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
+    const child = spawn(cmd, [url], { stdio: "ignore", detached: true });
+    child.on("error", () => {});
+    child.unref();
   } catch {
-    // fine — user opens the printed URL manually
+    // same outcome — the user opens the printed URL manually
   }
 }
 

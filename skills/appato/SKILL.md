@@ -54,16 +54,34 @@ out below the current directory. You never need to be in a special directory.
    for `Bash(appato *)` via /permissions or settings so every appato
    command is covered once.
 
-   **Logging in**: if any command says the user isn't logged in, run
-   `appato login --no-wait` — it prints an approval URL and exits
-   immediately (no long-running process to time out). Share the URL,
-   ask the user to approve in their browser, and after they confirm run any
-   appato command (start with `whoami`) — the CLI completes the pending
-   login automatically; approval order never matters. If even that is
-   blocked by the permission system, that's correct behavior, not an error
-   to work around: give the user `appato login` (with its full path if not
-   on their shell PATH) to run in their own terminal and continue once
-   they confirm.
+   **Logging in**: if any command says the user isn't logged in, take the
+   best of these that works — approval order never matters, because any
+   later appato command completes a pending login itself.
+   1. **In Claude Code:** run `appato login --no-wait` — it prints an
+      approval URL and exits immediately. Share the URL, then **keep
+      working**: scaffold the app directory, write code, do anything that
+      doesn't need the network. Do NOT end the turn just to wait. This
+      plugin's `appato-login` monitor interjects `APPATO_LOGIN_COMPLETE` the
+      moment the user approves; resume the appato commands then. If you run
+      out of offline work and it still hasn't arrived, end the turn saying
+      you'll continue once they approve — doing the work first is the win,
+      and the interjection never comes if they haven't approved yet.
+   2. **In Claude Code without monitors** — they need an interactive CLI
+      session, so they're absent on Amazon Bedrock, Google Cloud Agent
+      Platform and Microsoft Foundry, in non-interactive runs, and when
+      `DISABLE_TELEMETRY` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is
+      set. Run the blocking `appato login` (no `--no-wait`) as a background
+      command, read its output and share the approval URL it prints — no
+      browser opens on a headless box, so nobody sees that URL unless you
+      relay it. Claude Code re-invokes you when the command exits. Still
+      nothing for the user to type.
+   3. **In Codex, or when the permission system blocks the above:** run
+      `appato login --no-wait`, share the URL, and continue once the user
+      confirms they approved. Codex has no monitors and does not re-invoke
+      you when a background command exits, so never block a shell call
+      waiting on approval. A blocked command is correct behavior, not an
+      error to work around: give the user `appato login` (with its full
+      path if not on their shell PATH) to run in their own terminal.
 2. **Orient**: run `appato status` before anything else. Outside an app it
    lists apps the user may currently build and which are checked out below
    the current directory. `--all` is the member-safe app directory: use it
@@ -248,6 +266,7 @@ below explains what the important results mean.
 | `APPATO_KV` | `app` `scope` `key` `found` `by` `at` |
 | `APPATO_KV_DELETED` | `app` `scope` `key` `existed` |
 | `APPATO_KV_SET` | `app` `scope` `key` |
+| `APPATO_LOGIN_COMPLETE` | `user` `orgs` |
 | `APPATO_LOGIN_PENDING` | `url` `expires_at` |
 | `APPATO_LOGS` | `app` `deployed_version` `window_since` `entries` `errors` `error_groups` `stale_errors` `dropped` `client_dropped` `truncated` |
 | `APPATO_LOGS_CONSOLE` | `app` `window_since` `entries` |
@@ -329,6 +348,9 @@ below explains what the important results mean.
 - `APPATO_LOGIN_PENDING url=<url> expires_at=<ms-epoch>` — printed by
   `login --no-wait`: share `url` with the user; after they approve, any
   appato command completes the login.
+- `APPATO_LOGIN_COMPLETE user=<json-string> orgs=<json-string>` — arrives
+  from this plugin's login monitor the moment the user approves; the CLI is
+  now authenticated as `user`, so resume whatever was waiting on it.
 - `APPATO_INSTALLED version=<semver> path=<json-string>` — CLI installed
   at `path`; use it for subsequent commands.
 - `APPATO_CRONS app=<org>/<slug> count=<n> suspended=<true|false>` followed
