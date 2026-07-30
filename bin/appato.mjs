@@ -865,8 +865,9 @@ async function credentials() {
 
 async function apiFetch(path, options = {}) {
   const cred = await credentials();
-  const headers = { "Content-Type": "application/json", ...options.headers };
-  headers.Authorization = `Bearer ${cred.bearer}`;
+  const headers = new Headers(options.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  headers.set("Authorization", `Bearer ${cred.bearer}`);
   const res = await fetch(`${cred.host}${path}`, { ...options, headers });
   checkCliVersion(res);
   return res;
@@ -2583,7 +2584,6 @@ async function webhook(args = []) {
     if (!label) throw new Error(`usage: appato webhook ${sub} <label>`);
     const res = await apiFetch(base, {
       method: "POST",
-      headers: { "content-type": "application/json" },
       body: JSON.stringify({ label }),
     });
     const body = /** @type {Wire<WebhookCreated>} */ (await res.json());
