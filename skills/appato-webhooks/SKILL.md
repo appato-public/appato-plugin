@@ -124,6 +124,16 @@ provider, and send a safe representative request including any challenge
 flow. Then run `appato logs --source webhook`; do not declare the integration
 healthy from a successful push alone.
 
+Appato's webhook hostname accepts non-browser HTTP clients; callers do not
+need to imitate a browser or override a standard-library User-Agent to pass
+the gateway. A meaningful integration User-Agent is still useful for
+operations. If a request instead gets a Cloudflare-branded `403` with body
+`error code: 1010` and no `x-appato-request-id`, it was rejected before the
+hooks Worker and cannot appear in `appato logs`. Treat that as an Appato edge
+configuration regression, not a bad capability or provider credential; a
+custom User-Agent may confirm or temporarily work around the diagnosis, but
+is not the platform contract.
+
 Limits: 5 MiB request body; coarse abuse brake around 1,000 requests/minute
 per app per Cloudflare location. Platform `429`, `500`, and `503` responses
 are retry-oriented and providers may retry them.
