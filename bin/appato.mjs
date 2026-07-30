@@ -603,9 +603,12 @@ function sdkHelp() {
 APPS
   One directory per app; entrypoint index.ts (or .js) exports a fetch
   handler. Plain TS/JS ES modules — NO npm deps, no package.json, no
-  bundler. Serve HTML/CSS/JS inline from the fetch handler. The platform
-  handles ALL auth — never build login. The /_appato/* URL path is
-  reserved (your handler never sees it). Every push deploys.
+  bundler. For a browser UI, prefer index.html plus static CSS; index.html
+  serves / before the fetch handler. Keep browser JavaScript inside the HTML
+  for now because .js files are Worker modules, not static assets. Use the
+  fetch handler for APIs, scheduled jobs, webhooks, and genuinely dynamic
+  HTML. The platform handles ALL auth — never build login. The /_appato/*
+  URL path is reserved (your handler never sees it). Every push deploys.
 
 SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
   getUser(request)      -> { id, email, name, org } | null   (verified)

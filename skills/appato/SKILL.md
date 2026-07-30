@@ -407,7 +407,8 @@ below explains what the important results mean.
 ## App conventions
 
 - The entrypoint must be `index.ts` (or `index.js`) exporting a fetch
-  handler:
+  handler. It does not have to render the UI: a static `index.html` can own
+  `/`, while the fetch handler owns API routes and server-side work.
 
   ```ts
   import { getUser } from "./_appato.js";
@@ -422,13 +423,16 @@ below explains what the important results mean.
 
 - **No npm dependencies.** Apps are plain TypeScript/JavaScript ES modules —
   no package.json, no imports from npm, no bundler. Split code across
-  relative-imported files freely. Serve HTML/CSS/JS inline from the fetch
-  handler (template strings are fine and normal here).
-- **Non-code files are served at their path** — put images, fonts, CSS or
-  other assets in the app directory and reference them the way you would
-  anywhere else (`<img src="/logo.png">`). A shipped `.html` file serves at
-  its path with standard static-site behavior (`index.html` at `/`,
-  `page.html` at `/page`), shadowing your fetch handler for that path.
+  relative-imported files freely.
+- **Prefer static assets for a browser UI.** Put HTML, CSS, images, and fonts
+  in the app directory and reference them by path (`<img src="/logo.png">`).
+  A shipped `.html` file serves with standard static-site behavior
+  (`index.html` at `/`, `page.html` at `/page`), shadowing the fetch handler
+  for that path. Keep browser JavaScript inside the HTML for now: `.js` files
+  are Worker modules, not static browser assets. Use the fetch handler for API
+  routes, scheduled jobs, webhooks, and HTML that genuinely must be generated
+  on the server; do not embed an otherwise-static page in a TypeScript template
+  string.
 - `./_appato.js` is injected by the platform at deploy time — import it, but
   never create that file.
 - If the app must receive public third-party callbacks that cannot use member
@@ -454,9 +458,9 @@ below explains what the important results mean.
   view in the URL and keep it updated as the user navigates, so back,
   refresh, and a pasted link all land on the same view. A few lines of
   `history.pushState` + one `popstate` listener is enough — no router
-  library. Have the fetch handler serve the app shell for every view path
-  so deep links survive a reload (an app that's a single static
-  `index.html` can use `#/...` hash paths instead). Prefer human-readable
+  library. A static `index.html` should use `#/...` hash paths so deep links
+  keep resolving to that asset; use pathname routes only when the fetch
+  handler genuinely serves the shell for every view. Prefer human-readable
   slugs over opaque ids: `/polls/lunch-spot`, not `/poll?id=8f3a2c`.
 ## Shared data & realtime
 
