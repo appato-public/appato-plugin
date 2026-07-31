@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { gzipSync } from "node:zlib";
 
@@ -1945,6 +1945,12 @@ async function push(args = []) {
   }
   if (!res.ok) throw apiResponseError(body, `push failed (${res.status})`);
   console.log(`✓ deployed v${body.version} → ${body.url}`);
+  // Vendored SERVER npm dependencies ride the script upload on EVERY deploy
+  // (client ones are assets and negotiate like any other), so the total —
+  // both halves, one number — is printed whenever there is one: bloat has to
+  // be visible the moment it appears, not discovered later (docs/DEPS.md N16).
+  if (body.depBytes) console.log(`  ${formatBytes(body.depBytes)} of npm packages vendored`);
+  for (const warning of body.depWarnings ?? []) console.warn(`  ! ${warning}`);
   emit("APPATO_DEPLOYED", {
     app: `${org}/${app}`,
     version: body.version,
@@ -3986,7 +3992,10 @@ function collectFiles(root) {
       if (stats.isDirectory()) {
         walk(full);
       } else {
-        const rel = relative(root, full);
+        // Wire paths are canonical forward-slash: the platform classifies on
+        // prefixes like `client/` and serves assets at these exact paths, so
+        // Windows' backslashed `relative()` output must never reach the wire.
+        const rel = relative(root, full).split(sep).join("/");
         const bytes = readFileSync(full);
         const text = bytes.toString("utf8");
         if (Buffer.from(text, "utf8").equals(bytes)) {

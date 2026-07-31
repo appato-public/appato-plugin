@@ -421,18 +421,47 @@ below explains what the important results mean.
   };
   ```
 
-- **No npm dependencies.** Apps are plain TypeScript/JavaScript ES modules —
-  no package.json, no imports from npm, no bundler. Split code across
-  relative-imported files freely.
+- **npm packages: both halves, version written into the import.** There
+  is no package.json and no install step — you declare a package by writing
+  its version into the specifier, and `appato push` resolves and vendors it
+  into that version of the app:
+
+  ```ts
+  import { z } from "npm:zod@4";          // pin the major, or the exact version
+  import { format } from "npm:date-fns@4.1.0/format";
+  ```
+
+  The same line works in a `client/` file: browser code gets its own copy,
+  built for browsers and served as a static file. Always pin (`npm:zod@4`,
+  not `npm:zod`) and keep the list short — server dependencies are uploaded
+  with the app on every deploy, and push prints the total so you can see it
+  grow. Anything that can't be vendored fails the push with an error naming
+  the package; packages that load files (wasm, css, json, data) at import or
+  at runtime aren't supported. `node:` builtins (`node:crypto`,
+  `node:buffer`, …) may be imported directly in SERVER code and work on a
+  best-effort basis — the Workers runtime implements many but not all of
+  them, and an unsupported one fails at deploy; in `client/` they are refused
+  at push, because browsers have none. Split code across relative-imported
+  files freely.
 - **Prefer static assets for a browser UI.** Put HTML, CSS, images, and fonts
   in the app directory and reference them by path (`<img src="/logo.png">`).
   A shipped `.html` file serves with standard static-site behavior
   (`index.html` at `/`, `page.html` at `/page`), shadowing the fetch handler
-  for that path. Keep browser JavaScript inside the HTML for now: `.js` files
-  are Worker modules, not static browser assets. Use the fetch handler for API
-  routes, scheduled jobs, webhooks, and HTML that genuinely must be generated
-  on the server; do not embed an otherwise-static page in a TypeScript template
-  string.
+  for that path. Browser JavaScript goes under `client/`: files there compile
+  to static assets (`client/app.ts` → `/client/app.js`), so load them with
+  `<script type="module" src="/client/app.js"></script>`. Write
+  client-to-client imports as relative paths with the `.js` extension the
+  browser will actually fetch (`import { fmt } from "./util.js";` — the
+  source can still be `client/util.ts`). Client code may import packages with
+  the same `npm:pkg@version` specifier as server code, and JSX works in
+  `client/*.tsx` as soon as something in the app imports `npm:react@19` (plus
+  `npm:react-dom@19/client` to render it); a bare import nothing pins is
+  refused at push with the version-pinning suggestion. `client/` and server
+  code can never import each other — copy what both halves need. Everything
+  outside `client/` stays a Worker module.
+  Use the fetch handler for API routes, scheduled jobs, webhooks, and HTML that
+  genuinely must be generated on the server; do not embed an otherwise-static
+  page in a TypeScript template string.
 - `./_appato.js` is injected by the platform at deploy time — import it, but
   never create that file.
 - If the app must receive public third-party callbacks that cannot use member
@@ -465,8 +494,8 @@ below explains what the important results mean.
 ## Shared data & realtime
 
 Every app has a private, zero-setup data store and realtime hub — no
-provisioning, no credentials, no npm. (`appato sdk` prints this whole
-reference — API surface, tiers, recipes, limits — whenever you need it.)
+provisioning, no credentials, nothing to install. (`appato sdk` prints this
+whole reference — API surface, tiers, recipes, limits — whenever you need it.)
 **Every read and write names a scope.** There is no unscoped store — you
 pick who the data belongs to on every call, and the platform enforces it
 using the identity it already verified. You never write an auth check for
