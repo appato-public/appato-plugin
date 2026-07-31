@@ -160,6 +160,7 @@ const MACHINE_LINE_CONTRACT = {
     machineInteger("sessions"),
   ]),
   APPATO_DELETED: machineLine([machineString("app")]),
+  APPATO_DEP_BUILDING: machineLine([machineString("app"), machineString("message", "json")]),
   APPATO_DEPLOYED: machineLine([
     machineString("app"),
     machineInteger("version"),
@@ -1931,6 +1932,14 @@ async function push(args = []) {
     // in between, or our view was wrong. Say the whole thing instead.
     res = await pushRequest(org, app, files, binHashes, null, meta);
     body = await res.json();
+  }
+  if (res.status === 400 && body.code === "dep_building") {
+    // The package supplier is building a dependency right now and its build
+    // outlives our request, so the SAME push a moment later usually succeeds
+    // (docs/DEPS.md N22). Nothing was saved — this is a wait, not a fix.
+    console.error(`✗ ${body.error}`);
+    emit("APPATO_DEP_BUILDING", { app: `${org}/${app}`, message: body.error });
+    process.exit(2);
   }
   if (res.status === 422) {
     console.error(`✗ pushed v${body.version}, but deploy FAILED:\n  ${body.deployError}`);

@@ -250,6 +250,7 @@ below explains what the important results mean.
 | `APPATO_CRONS` | `app` `count` `suspended` |
 | `APPATO_DATA` | `app` `tables` `kv_shared` `kv_readonly` `kv_internal` `people` `size_bytes` `sessions` |
 | `APPATO_DELETED` | `app` |
+| `APPATO_DEP_BUILDING` | `app` `message` |
 | `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
 | `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
 | `APPATO_EMAIL` | `app` `namespace` `inbound` `outbound` `desired_inbound` `desired_outbound` |
@@ -296,6 +297,11 @@ below explains what the important results mean.
   error=<json-string>` — the code was saved but is NOT live; the previous
   version keeps serving. Fix and push again. (`sha` is present on push
   failures, absent on rollback failures.)
+- `APPATO_DEP_BUILDING app=<org>/<slug> message=<json-string>` — the package
+  supplier is still building an npm dependency this app imports; nothing was
+  saved. Do not change the code: wait about 30 seconds and run the SAME push
+  again. Give it up to about three attempts in total, then stop and tell the
+  user which package is stuck.
 - `APPATO_ROLLED_BACK app=<org>/<slug> version=<n> restored=<m> url=<url>`
   — v`m`'s files were restored as new version `n`, which is now live.
   `restored` names the version that authored the content: rolling back to
