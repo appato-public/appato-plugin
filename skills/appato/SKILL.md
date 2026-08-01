@@ -1,6 +1,12 @@
 ---
 name: appato
-description: Build and deploy small internal web apps ("utilities") on the appato platform. Use whenever the user asks to build, change, or deploy an appato app, or asks for a small internal tool/utility their team can use. Handles creating the app, writing the code, and keeping it deployed via the appato CLI.
+description: >-
+  Build, change, deploy, and troubleshoot small internal web apps
+  ("utilities") on appato, and report bugs in the appato platform or CLI
+  through its CLI-independent intake. Use whenever the user asks for an appato
+  app or internal team utility, reports appato or CLI failures, unexpected
+  platform behavior, failed or wedged deploys, appato.com 5xx responses, or
+  wants to send appato feedback.
 allowed-tools: Bash(appato *)
 ---
 
@@ -30,6 +36,10 @@ outside, `appato status` lists apps the caller may build and which are checked
 out below the current directory. You never need to be in a special directory.
 
 ## Workflow
+
+For a request specifically about an appato platform or CLI failure, or to
+report appato feedback, skip bootstrap and orientation and go directly to
+"Reporting platform bugs." Do not probe guessed CLI subcommands.
 
 1. **Bootstrap** — find a working `appato`, in this order:
    1. `command -v appato` — in Claude Code this plugin puts `appato` on
