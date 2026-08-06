@@ -632,7 +632,7 @@ SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
 
   Each scope has the same verbs (keys are relative to the scope):
     .get(key)                 -> value | undefined
-    .set(key, value)             values: any JSON <= 128KB
+    .set(key, value)             values: any JSON <= 1MB
     .delete(key)
     .list(prefix, { limit, reverse, after }) -> [{ key, value, by, at }]
     .push(prefix, value)      -> key  (server-assigned time-sortable id:
@@ -678,7 +678,7 @@ BROWSER SDK — in your served HTML:
   </script>
 
 FILES (uploads) — the SAME scopes, a second verb set, backed by R2
-  storage is for JSON <= 128KB; files are for blobs (images, PDFs, exports).
+  storage is for JSON <= 1MB; files are for blobs (images, PDFs, exports).
   Every call names a scope, resolved by the platform against the identity it
   verified — exactly like storage, so no signed or unguessable URLs.
 
@@ -803,10 +803,10 @@ SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
   Test without waiting: appato cron run <name> · appato cron (list/status)
 
 LIMITS (per app; storage sizes are plan-dependent)
-  128KB/value · 100MB total on the default plan — plan-dependent · watch
+  1MB/value · 100MB total on the default plan — plan-dependent · watch
   <= 500 entries/prefix (paginate with list/SQL past that) · presence data
   <= 2KB · broadcast <= 32KB
-  files (default plan): 25MB/file · ~1GB/app · 1000 files/app
+  files (default plan): 25MB/file · ~1GB/app · 10,000 files/app
   schedules: plan-dependent (typically 10/app, min 1 min apart)
 
 WORKFLOW

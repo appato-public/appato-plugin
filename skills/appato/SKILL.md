@@ -570,7 +570,7 @@ const drafts = await storage.forUser(user.id).list("drafts/");
 ```
 
 Keys are plain strings, relative to their scope; use `/`-separated prefixes
-as collections (`messages/`, `votes/`). Values are JSON (≤128KB each; ~100MB
+as collections (`messages/`, `votes/`). Values are JSON (≤1MB each; ~100MB
 per app on the default plan — the store cap is plan-dependent). Nothing is
 reserved — the same key in two scopes is two different values.
 
@@ -652,7 +652,7 @@ reconnect handling, or a version check.
 
 ## File uploads (images, PDFs, exports)
 
-`storage` holds JSON (≤128KB); **files** hold blobs — avatars, photos,
+`storage` holds JSON (≤1MB); **files** hold blobs — avatars, photos,
 generated PDFs, CSV exports. Files use the **same scopes as storage** and the
 same rule (the platform enforces who can reach what, using the identity it
 verified), so there are no signed or unguessable URLs to manage.
@@ -683,7 +683,7 @@ Verbs, per scope (keys are strings, relative to the scope):
 
 Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
 even a mis-typed HTML or SVG upload can't script your app. Limits (default
-plan, plan-dependent): **25MB per file, ~1GB per app, 1000 files**.
+plan, plan-dependent): **25MB per file, ~1GB per app, 10,000 files**.
 
 **Server** (`./_appato.js`):
 
