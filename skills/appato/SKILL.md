@@ -182,7 +182,12 @@ report appato feedback, skip bootstrap and orientation and go directly to
    succeeds. If the user wants a previous version back (`appato history`
    lists them), run `appato rollback <version>` — it restores that
    version's files as a new version (history is append-only; nothing is
-   lost) — then `appato sync` to update the local copy. To inspect a past
+   lost) — then `appato sync` to update the local copy. Rollback restores
+   CODE, not data: if a newer version changed how the app stores its state
+   (moved keys, new SQL tables), the rolled-back code reads that changed
+   data as-is. When you migrate a storage shape, record the earliest
+   version that still understands it (a "rollback floor" note in the
+   README) at migration time, not during an emergency. To inspect a past
    version without checking it out, `appato show <version>` prints its header,
    composition, and file list, and `appato show <version> <path>` prints one
    file; to materialize an old version into a fresh directory (its files and
@@ -427,11 +432,11 @@ below explains what the important results mean.
   `/`, while the fetch handler owns API routes and server-side work.
 
   ```ts
-  import { getUser } from "./_appato.js";
+  import { requireUser } from "./_appato.js";
 
   export default {
     async fetch(request: Request): Promise<Response> {
-      const user = getUser(request); // { id, email, name, org } — always set
+      const user = requireUser(request); // verified { id, email, name, org }
       return new Response(`Hello ${user.name}`);
     },
   };
@@ -458,9 +463,15 @@ below explains what the important results mean.
   best-effort basis — the Workers runtime implements many but not all of
   them, and an unsupported one fails at deploy; in `client/` they are refused
   at push, because browsers have none. Split code across relative-imported
-  files freely.
-- **Prefer static assets for a browser UI.** Put HTML, CSS, images, and fonts
-  in the app directory and reference them by path (`<img src="/logo.png">`).
+  files freely. Client packages are vendored as separate files, so a literal
+  dynamic `import("npm:pkg@ver")` in client code genuinely defers the
+  download until the line runs — use it to keep a heavy optional library
+  (an editor, a charting engine, ML tooling) out of the initial page load.
+- **Prefer static assets for a browser UI.** Put HTML, CSS, images, fonts,
+  and data files (`.json`, `.txt`) in the app directory and reference them
+  by path (`<img src="/logo.png">`, `fetch("/stations.json")`). A `.json`
+  file is always data to `fetch()`, never an importable module — importing
+  one fails the build with the fix in the error.
   A shipped `.html` file serves with standard static-site behavior
   (`index.html` at `/`, `page.html` at `/page`), shadowing the fetch handler
   for that path. Browser JavaScript goes under `client/`: files there compile
@@ -468,18 +479,34 @@ below explains what the important results mean.
   `<script type="module" src="/client/app.js"></script>`. Write
   client-to-client imports as relative paths with the `.js` extension the
   browser will actually fetch (`import { fmt } from "./util.js";` — the
-  source can still be `client/util.ts`). Client code may import packages with
+  source can still be `client/util.ts`). A ready-made browser `.js` file —
+  a vendored library loader, a worker script — also belongs under `client/`,
+  where it deploys as a static asset at `/client/<name>.js`; nothing outside
+  `client/` ever serves as browser JavaScript. Client code may import packages with
   the same `npm:pkg@version` specifier as server code, and JSX works in
   `client/*.tsx` as soon as something in the app imports `npm:react@19` (plus
   `npm:react-dom@19/client` to render it); a bare import nothing pins is
   refused at push with the version-pinning suggestion. `client/` and server
-  code can never import each other — copy what both halves need. Everything
-  outside `client/` stays a Worker module.
+  code can never import each other's files — what both halves need goes in
+  **`shared/`**: one file, compiled once, emitted to BOTH surfaces (a server
+  module at `shared/x.js` and a static asset at `/shared/x.js`), so a
+  contract the halves must agree on — a cache-key recipe, a wire shape,
+  shared constants — cannot drift from itself. Both halves import it with
+  ordinary relative paths (`./shared/util.js` from the server,
+  `../shared/util.js` from `client/`). `shared/` may import only other
+  `shared/` files and declares no `npm:`/`node:` packages — import the
+  package in the half that needs it and pass values into the shared code.
+  Everything outside `client/` and `shared/` stays a Worker module.
   Use the fetch handler for API routes, scheduled jobs, webhooks, and HTML that
   genuinely must be generated on the server; do not embed an otherwise-static
   page in a TypeScript template string.
 - `./_appato.js` is injected by the platform at deploy time — import it, but
-  never create that file.
+  never create that JavaScript file. For a project that already runs its own
+  TypeScript compiler, `appato types` writes the authoritative
+  `_appato.d.ts` beside `appato.json`; add `appato types --check` to its local
+  or CI gate so a missing/stale copy fails loudly. The declaration is local
+  tooling and the CLI permanently excludes it from deploys. Appato itself
+  still type-strips rather than typechecking user code.
 - If the app must receive public third-party callbacks that cannot use member
   SSO, also load the `appato-webhooks` skill. Keep webhook mechanics out of
   ordinary authenticated `fetch` routes.
@@ -528,9 +555,10 @@ Choosing is one question: **whose data is this?** If it's the team's,
 `shared`. If it's one person's, `mine`. If your server computes it, ask
 whether the browser should see it — `readonly` if yes, `internal` if no.
 
-Nothing typechecks an app for you, so this table and `appato sdk` are the
-contract — a scope or verb that isn't in them doesn't exist, and calling one
-throws when that line runs.
+Appato does not run a compiler over the app. In an existing TypeScript project,
+run `appato types` and keep `appato types --check` in the project's own gate;
+otherwise this table and `appato sdk` are the contract — a scope or verb that
+isn't in them doesn't exist, and calling one throws when that line runs.
 
 Three tiers — picking the right one matters:
 
@@ -555,8 +583,16 @@ const key = await shared.push("messages/", { text }); // appends with a
     // server-assigned time-sortable id → keys sort chronologically
 const n = await shared.increment("votes/pizza");      // atomic counter
 const msgs = await shared.list("messages/", { limit: 50, reverse: true });
-    // -> [{ key, value, by, at }]  — `by` is the verified writer, or null
+    // -> [{ key, value, by, at, rev }]  — `by` is the verified writer, or null
 await shared.delete("polls/old");
+
+// Contended state: compare-and-swap instead of get -> set (which silently
+// loses one writer's update when two race). rev is 1 on create, +1 per write.
+const cur = await shared.entry("game");        // { value, by, at, rev } | undefined
+await shared.set("game", next, { ifRev: cur?.rev ?? null });
+    // only-if-unchanged; ifRev: null = only-create-if-absent (a claim). A
+    // stale rev throws AppatoRevConflictError (.code "rev_conflict") —
+    // catch it, re-read, recompute, retry.
 
 await readonly.set("stats", computed);   // browsers read this, can't change it
 await internal.set("apiKey", secret);    // browsers never see this at all
@@ -569,10 +605,24 @@ await publish("refresh", { reason: "new data" });      // ephemeral broadcast
 const drafts = await storage.forUser(user.id).list("drafts/");
 ```
 
+**How storage executes** — worth internalizing before designing state: your
+handler runs in its own isolate, not inside the storage engine, and every
+storage call is one independent atomic round trip. Between two of your
+calls, other requests run — so `get → modify → set` is a real race; that's
+what `{ ifRev }` (or SQL `UPDATE … WHERE`) is for, and `increment` is
+already atomic on its own. `sqlBatch` is the only multi-statement
+transaction. A thrown error rolls back nothing already written. Writing a
+value identical to the current one still counts as a write (watchers fire).
+
 Keys are plain strings, relative to their scope; use `/`-separated prefixes
 as collections (`messages/`, `votes/`). Values are JSON (≤1MB each; ~100MB
 per app on the default plan — the store cap is plan-dependent). Nothing is
-reserved — the same key in two scopes is two different values.
+reserved — the same key in two scopes is two different values. **Never let
+one value grow without bound** (a game log, a history array, an audit
+trail): every save rewrites the whole blob, and the cap is a cliff the app
+falls off mid-use. Append-only data is `push()` entries under a prefix —
+each entry its own value, keys already chronological — not an array inside
+one value.
 
 **SQL** for structured data (reports, joins, aggregates) — the app's own
 private SQLite. **Server-side only**: call it in your fetch handler and
@@ -608,7 +658,7 @@ knows the signed-in user; never build login or ask who the user is):
   // on every change (snapshot semantics — reconnects re-sync automatically).
   // `watch` is a verb on each scope, so a subscription never mixes them.
   shared.watch("messages/", (entries) => {
-    // entries: [{ key, value, by, at }] sorted by key (push keys =
+    // entries: [{ key, value, by, at, rev }] sorted by key (push keys =
     // chronological). `at` is the write time (always set). `by` is the
     // platform-verified writer — { id, name } for a person, or NULL when
     // the app's own server wrote the row, so always handle null. NEVER
@@ -810,6 +860,43 @@ Behavior worth knowing (don't rebuild any of it):
 - Plans cap how many schedules an app may have and how often they may run;
   a push that exceeds it fails with the limit in the error.
 
+## Email (the app sends and receives its own mail)
+
+When the feature calls for email — "email whoever's turn it is", a nightly
+digest, "let people mail expenses in" — the app has its own mail capability.
+**Enabling it is your job, not a setting you wait on**: `appato.json`
+showing `"email": { "outbound": false }` means it hasn't been enabled yet,
+not that someone decided against it. From the app checkout:
+
+```
+appato email enable outbound     # or: inbound | both
+appato email status
+```
+
+The app's stable address is `<local>@<app>-<org>.appato.app`. Sending, from
+the server (often inside a cron handler — that pairing is how "notify the
+person we're waiting on" features work):
+
+```ts
+import { email } from "./_appato.js";
+await email.send({
+  from: { local: "game", name: "Standup Bot" },
+  to: [player.email],
+  subject: "Your turn",
+  text: "It's your move in " + gameName + ".",
+  category: "notification",        // or "transactional"
+});
+```
+
+Receiving: `handleEmail("support", async (message) => { … })` at module
+scope gets `support+anything@…` as alias `"support"`; attachments load
+lazily via `message.attachments[n].get()`. The platform enforces recipient
+policy (workspace users / claimed domain), preferences, suppressions, and
+quotas before anything leaves — you never build unsubscribe or rate
+limiting. Message content expires after ~30 days; `appato email logs` shows
+metadata, `appato email get <id> --body` the content. Full reference:
+`appato sdk`, EMAIL section.
+
 ## App data (inspecting and fixing what the app stored)
 
 `appato data` is the operator view over the app's own storage — the same KV
@@ -825,7 +912,10 @@ changed what — edit deliberately.
   scope, people with personal data, storage size, live sessions.
 - `appato data ls [prefix] [--scope ...] [--user <id|email>]` — list keys.
 - `appato data get|rm <key> [--scope ...] [--user ...]` — read / delete one
-  value.
+  value. `get --json` prints the value and nothing else, so piping into
+  `JSON.parse`/`jq` works without stripping the machine line.
+- `data`, `files`, and `logs` all take `--app <org>/<slug>` to name the app
+  when run outside a checkout — scripts don't need to `cd` in.
 - `appato data set <key> <value|-> [--scope ...] [--user ...]` — write one
   value: parsed as JSON if it parses, kept as a plain string otherwise
   (`set greeting hello` and `set config '{"x":1}'` both do the obvious
