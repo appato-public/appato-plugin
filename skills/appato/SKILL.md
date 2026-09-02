@@ -268,6 +268,10 @@ below explains what the important results mean.
 | `APPATO_DEP_BUILDING` | `app` `message` |
 | `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
 | `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
+| `APPATO_DOMAIN` | `hostname` `domain` `state` `app` `url` |
+| `APPATO_DOMAIN_CANDIDATE` | `domain` `available` `price_cents` `renewal_cents` |
+| `APPATO_DOMAIN_ORDER` | `hostname` `domain` `order` `state` `price_cents` `checkout_url` `expires_at` |
+| `APPATO_DOMAIN_TRANSFER` | `domain` `auth_code` `locked_until` |
 | `APPATO_EMAIL` | `app` `namespace` `inbound` `outbound` `desired_inbound` `desired_outbound` |
 | `APPATO_EMAIL_MESSAGE` | `app` `id` `direction` `status` `from` `to` `subject` `occurred_at` |
 | `APPATO_EMAIL_READY` | `app` `direction` `enabled` `inbound` `outbound` |
@@ -862,6 +866,68 @@ Behavior worth knowing (don't rebuild any of it):
 - An app may have at most 10 schedules, firing at most once a minute; a push
   that exceeds either fails with the limit in the error.
 
+## Custom domains (a real address for the app)
+
+When the user asks for a real address — "can this live at lunch.acme.com",
+"give it a proper domain", "I want a link I can put on a poster" — the app
+can serve from a hostname the workspace owns instead of the
+`{app}-{org}.appato.app` one.
+
+Domains belong to the **workspace**; an app takes exactly ONE hostname under
+them — the apex (`acme.com`) or one label beneath it (`lunch.acme.com`),
+never a path, never two. `www.{apex}` is not attachable: it always redirects
+to the apex. **Check `appato domain` first.** If the workspace already owns the domain,
+`appato domain buy lunch.acme.com` costs nothing and returns in one round
+trip; there is no money, no approval, and nothing to wait for.
+
+**Finding a name — brainstorm, then ask ONCE.** You are better at inventing
+names than the registrar's suggestion endpoint, and the registrar
+rate-limits us account-wide, so:
+
+```
+appato domain search lunchtool.com teamlunch.com lunchapp.io --tld com,app
+```
+
+Think up candidates yourself (short, memorable, tied to what the app does —
+up to 50), then check them ALL in **one** `appato domain search` call,
+dotted. Never search in a loop, never one word at a time, and never
+per keystroke — a lockout stops every workspace's search for minutes. Bring
+back 3–5 with their prices and let the user pick.
+
+**The human names it and the human approves the money.** Never buy a domain
+the user didn't name. Prefer a subdomain of a domain they already own;
+take the apex only when they ask for it.
+
+```
+appato domain buy lunch.acme.com          # one hostname per app; detach before re-pointing
+```
+
+On a name nobody owns, `buy` quotes the first year and the renewal, prints
+a checkout link, and waits. Show the user that link and say it needs a
+workspace admin to approve it — if that isn't the person you're talking to,
+they can share it. Approval happens in the browser (registrant details the
+first time, then the disclosures: **non-refundable**, a **60-day transfer
+lock** after registration, and a **yearly renewal**). While it waits, `buy`
+prints each step it observes; it stops when the platform says the hostname
+is `active`, or reports `domain_order_failed` / `domain_order_expired`.
+`--no-wait` returns immediately — `appato domain` shows the state later, and
+re-running `buy` resumes the same order rather than ordering twice.
+
+Once a hostname is `active`, **that IS the app's address**: use it in every
+link, message, and summary from then on (`appato domain` lists it). In app
+code, build absolute links from `new URL(request.url).origin` — every
+invocation (a browser request, a scheduled run, a webhook delivery) carries
+the app's public address there, so a link is right before and after a domain
+is attached.
+
+`appato domain detach <hostname>` stops serving it — the registration itself
+is untouched and stays the workspace's.
+
+Never print or store a domain's transfer auth code; releases and registrant
+edits are console-only, by a human. `appato domain transfer-out <domain>`
+prints the code for the HUMAN to paste at their new registrar — read it back
+to nobody: never copy it into a file, a commit, a summary, or your own reply.
+
 ## Email (the app sends and receives its own mail)
 
 When the feature calls for email — "email whoever's turn it is", a nightly
@@ -1016,7 +1082,9 @@ Machine lines:
 ## Answering "where is my app?"
 
 `appato status` shows the deploy state and URL. Share the URL with the user
-when a push succeeds — anyone in their company org can open it.
+when a push succeeds — anyone in their company org can open it. If the app
+has a custom hostname, that address takes precedence — use it everywhere
+instead of the `{app}-{org}.appato.app` one (`appato domain` lists them).
 
 ### Billing
 

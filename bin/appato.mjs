@@ -41,6 +41,12 @@ const VERSION = "0.11.0";
 
 const DEFAULT_HOST = process.env.APPATO_HOST || "https://appato.com";
 
+// How often `domain buy` re-reads a pending order while the human approves it
+// in the browser. There is no fixed deadline on that wait (docs/CUSTOM_DOMAINS.md
+// CD19) — only this cadence, overridable so tests can drive the loop, the same
+// lever APPATO_HOST gives them.
+const POLL_INTERVAL_MS = Number(process.env.APPATO_POLL_MS) || 5000;
+
 const CRED_DIR = join(homedir(), ".appato");
 
 const CRED_FILE = join(CRED_DIR, "credentials.json");
@@ -188,6 +194,35 @@ const MACHINE_LINE_CONTRACT = {
       ["app", "version", "error"],
     ],
   ),
+  APPATO_DOMAIN: machineLine([
+    machineString("hostname"),
+    machineString("domain"),
+    machineString("state"),
+    machineString("app", "raw", "none"),
+    // A hostname that no longer serves has no URL to print — the sentinel,
+    // never a link to a host that answers nothing (CD3).
+    machineString("url", "raw", "none"),
+  ]),
+  APPATO_DOMAIN_CANDIDATE: machineLine([
+    machineString("domain"),
+    machineBoolean("available"),
+    machineInteger("price_cents"),
+    machineInteger("renewal_cents", "none"),
+  ]),
+  APPATO_DOMAIN_ORDER: machineLine([
+    machineString("hostname"),
+    machineString("domain"),
+    machineString("order"),
+    machineString("state"),
+    machineInteger("price_cents"),
+    machineString("checkout_url", "json", "none"),
+    machineInteger("expires_at", "none"),
+  ]),
+  APPATO_DOMAIN_TRANSFER: machineLine([
+    machineString("domain"),
+    machineString("auth_code", "json"),
+    machineInteger("locked_until", "none"),
+  ]),
   APPATO_FILE: machineLine(
     [
       machineString("app"),
@@ -537,6 +572,24 @@ usage:
                             request an opaque public URL for a snake_case label
   appato webhook delete <label>
                             revoke the URL immediately (recreate to rotate it)
+  appato domain [--json]    the workspace's domains and where each hostname
+                            points (custom addresses for apps)
+  appato domain search <keyword or name…> [--tld com,app] [--json]
+                            check candidate names and their prices in ONE
+                            call — pass every candidate at once (a dotted
+                            name is an exact availability check)
+  appato domain buy <hostname> [--no-wait]
+                            point a hostname at this app (one per app). Free
+                            and instant under a domain the workspace already
+                            owns; otherwise it quotes the purchase, prints a
+                            checkout link for an admin to approve, and waits
+  appato domain detach <hostname>
+                            stop serving that hostname (the registration is
+                            untouched)
+  appato domain transfer-out <domain> [--json]
+                            unlock the domain and print the authorization code
+                            for moving it to another registrar (admin/owner;
+                            the code is for the human, never a log or a file)
   appato email status [--json]
                             show the app-owned address and inbound/outbound state
   appato email enable|disable inbound|outbound|both
@@ -932,8 +985,6 @@ async function login(args = []) {
 }
 
 const IDLE_MS = 2000;
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Passive login watcher for agent harnesses — the plugin's `appato-login`
@@ -3076,6 +3127,330 @@ async function webhook(args = []) {
 }
 
 // ---------------------------------------------------------------------------
+// cli/src/domain.mjs
+
+/**
+ * Custom domains (docs/CUSTOM_DOMAINS.md "The interface"). The workspace owns
+ * registrations; an app takes ONE hostname under them (CD3). Five verbs: the
+ * list, one search per command (never a loop — the registrar rate-limits
+ * hard, CD16), `buy` (free and instant on an owned domain, an admin-approved
+ * order otherwise), `detach`, which only ever stops serving a hostname, and
+ * `transfer-out`, which hands the customer the code that moves the
+ * registration to any other registrar.
+ *
+ * Anchored on the app like `data`/`files`: the org comes from the checkout (or
+ * `--app org/slug`), and `buy` attaches to that app.
+ */
+async function domain(args = []) {
+  const { org, app } = appTarget(args);
+  // Positionals: only the KNOWN flags are flags — a search term or hostname
+  // may not dash-lead, but an unknown --flag is a typo worth reporting.
+  // Mirrors data()'s parser.
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json" || a === "--no-wait") continue;
+    if (a === "--tld" || a === "--app") i++;
+    else if (a.startsWith("--")) throw new Error(`unknown flag ${a} — see: appato (usage)`);
+    else positionals.push(a);
+  }
+  const [sub = "list", ...rest] = positionals;
+  const json = args.includes("--json");
+
+  if (sub === "list") return domainListCmd(org, json);
+  if (sub === "search") return domainSearchCmd(org, rest, flagValue(args, "--tld"), json);
+  if (sub === "buy") {
+    if (!rest[0]) throw new Error("usage: appato domain buy <hostname>");
+    return domainBuyCmd(org, app, rest[0], { wait: !args.includes("--no-wait"), json });
+  }
+  if (sub === "detach") {
+    if (!rest[0]) throw new Error("usage: appato domain detach <hostname>");
+    return domainDetachCmd(org, rest[0], json);
+  }
+  if (sub === "transfer-out") {
+    if (!rest[0]) throw new Error("usage: appato domain transfer-out <domain>");
+    return domainTransferOutCmd(org, rest[0], json);
+  }
+  throw new Error(
+    `unknown domain command "${sub}" — use: list | search <query…> | buy <hostname> | detach <hostname> | transfer-out <domain>`,
+  );
+}
+
+const money = (cents) => `$${(cents / 100).toFixed(2)}`;
+
+/**
+ * The registrar's account-wide lockout (CD16) has no `code` on the wire —
+ * just the message and when it lifts — so the CLI names it, and the agent
+ * learns "stop searching" from a stable code instead of prose.
+ */
+function rateLimited(body) {
+  const when = typeof body?.retryAt === "number" ? ` — try again ${until(body.retryAt)}` : "";
+  return apiResponseError(
+    {
+      ...body,
+      code: "registrar_rate_limited",
+      error: `${body?.error || "the domain registrar is rate-limiting us"}${when}`,
+    },
+    "the domain registrar is rate-limiting us",
+  );
+}
+
+/** GET the workspace's domains. */
+async function fetchDomains(org) {
+  const res = await apiFetch(`/api/orgs/${org}/custom-domains`);
+  const body = /** @type {Wire<DomainList>} */ (await res.json());
+  if (!res.ok) throw apiResponseError(body, `domain list failed (${res.status})`);
+  return body;
+}
+
+async function domainListCmd(org, json) {
+  const body = await fetchDomains(org);
+  if (json) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  if (body.domains.length === 0) {
+    console.log("No domains yet. Find one with: appato domain search <keyword or name>");
+  }
+  for (const d of body.domains) {
+    const expiry = d.expiresAt ? `  renews ${until(d.expiresAt)}` : "";
+    const price = d.renewalCents === null ? "" : `  ${money(d.renewalCents)}/yr`;
+    console.log(`${d.domain}  ${d.state}${expiry}${price}`);
+    for (const h of d.hostnames) {
+      console.log(h.app ? `  ● ${h.hostname} → ${h.app}` : `  ○ ${h.hostname} (unattached)`);
+    }
+  }
+  for (const d of body.domains) {
+    for (const h of d.hostnames) emitHostname(h);
+  }
+}
+
+function emitHostname(h) {
+  emit("APPATO_DOMAIN", {
+    hostname: h.hostname,
+    domain: h.domain,
+    state: h.state,
+    app: h.app,
+    url: `https://${h.hostname}`,
+  });
+}
+
+/**
+ * ONE registrar call per command (CD16). The positional words are joined into
+ * a single query, so the agent brainstorms candidates itself and checks them
+ * all at once — `search team lunch tool` and `search lunch.acme.com
+ * lunchtool.com` are both one round trip.
+ */
+async function domainSearchCmd(org, words, tld, json) {
+  const query = words.join(" ").trim();
+  if (!query) throw new Error("usage: appato domain search <keyword or name…> [--tld com,app]");
+  const tlds = (tld ?? "")
+    .split(",")
+    .map((t) => t.trim().replace(/^\./, ""))
+    .filter(Boolean);
+  const res = await apiFetch(`/api/orgs/${org}/custom-domains/search`, {
+    method: "POST",
+    body: JSON.stringify({ query, ...(tlds.length > 0 ? { tlds } : {}) }),
+  });
+  const body = /** @type {Wire<DomainSearch>} */ (await res.json());
+  if (res.status === 429) throw rateLimited(body);
+  if (!res.ok) throw apiResponseError(body, `domain search failed (${res.status})`);
+  if (json) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  if (body.results.length === 0) console.log("No candidates — try other words or --tld.");
+  for (const r of body.results) {
+    console.log(
+      r.available
+        ? `✓ ${r.domain}  ${money(r.priceCents)}/yr (renews ${money(r.renewalCents)})`
+        : `✗ ${r.domain}  taken`,
+    );
+  }
+  for (const r of body.results) {
+    emit("APPATO_DOMAIN_CANDIDATE", {
+      domain: r.domain,
+      available: r.available,
+      price_cents: r.priceCents,
+      renewal_cents: r.renewalCents,
+    });
+  }
+}
+
+async function domainBuyCmd(org, app, hostname, { wait, json }) {
+  const res = await apiFetch(`/api/orgs/${org}/custom-domains/hostnames`, {
+    method: "POST",
+    body: JSON.stringify({ hostname, app }),
+  });
+  const body = /** @type {Wire<HostnameAttach>} */ (await res.json());
+  if (res.status === 429) throw rateLimited(body);
+  if (!res.ok) throw apiResponseError(body, `domain buy failed (${res.status})`);
+  if (json) {
+    // The raw-body escape hatch, like every other --json: it reports the
+    // request's own outcome and never waits on the order.
+    console.log(JSON.stringify(body));
+    return;
+  }
+
+  if (body.kind === "attached") {
+    const h = body.hostname;
+    console.log(`✓ https://${h.hostname} → ${h.app}`);
+    emitHostname(h);
+    return;
+  }
+
+  const order = body.order;
+  const renewal = order.renewalCents === null ? "" : `, renews ${money(order.renewalCents)}/yr`;
+  console.log(`${order.domain} — ${money(order.priceCents)} for the first year${renewal}`);
+  if (order.checkoutUrl) {
+    console.log(order.checkoutUrl);
+    console.log(
+      "Open this link to approve the purchase (a workspace admin must approve; share the link if that isn't you)",
+    );
+  }
+  emit("APPATO_DOMAIN_ORDER", {
+    hostname: order.hostname,
+    domain: order.domain,
+    order: order.id,
+    state: order.state,
+    price_cents: order.priceCents,
+    checkout_url: order.checkoutUrl,
+    expires_at: order.expiresAt,
+  });
+  if (!wait) {
+    console.log(
+      `Not waiting. \`appato domain\` shows it once it's live, and \`appato domain buy ${order.hostname}\` resumes this same order.`,
+    );
+    return;
+  }
+  await waitForOrder(org, order.id, order.hostname);
+}
+
+/** What each non-terminal order state means, printed once per change. */
+const ORDER_PROGRESS = {
+  pending_approval: "waiting for approval…",
+  pending_payment: "waiting for payment…",
+  paid: "paid — registering…",
+  registering: "paid — registering…",
+};
+
+/**
+ * Wait for the order the human is approving in a browser. There is NO fixed
+ * timeout and no sleep budget (CD19): the order carries its own deadline and
+ * the server marks it `expired`, so every exit here is content-derived.
+ */
+async function waitForOrder(org, id, hostname) {
+  let note = null;
+  for (;;) {
+    await sleep(POLL_INTERVAL_MS);
+    const res = await apiFetch(`/api/orgs/${org}/custom-domains/orders/${id}`);
+    const body = /** @type {Wire<DomainOrderDetail>} */ (await res.json());
+    if (!res.ok) throw apiResponseError(body, `couldn't read the order (${res.status})`);
+    const order = body.order;
+    const progress = ORDER_PROGRESS[order.state];
+    if (progress && progress !== note) {
+      note = progress;
+      console.log(progress);
+    }
+    if (order.state === "active") {
+      // The registration landed, but CD3 refused the attach — the app took
+      // another hostname while the order was in flight. Never print a live
+      // URL, and never emit `active`, for a host that answers nothing.
+      if (!body.hostname) {
+        console.log(
+          `✓ ${order.domain} is registered, but not attached to this app (it already has a hostname) — \`appato domain\` shows it`,
+        );
+        emit("APPATO_DOMAIN", {
+          hostname: order.hostname,
+          domain: order.domain,
+          state: "detached",
+          app: null,
+          url: null,
+        });
+        return;
+      }
+      console.log(`✓ https://${hostname} is live`);
+      emitHostname(body.hostname);
+      return;
+    }
+    if (order.state === "failed") {
+      const reason = order.failedReason || "the purchase failed";
+      console.error(`✗ ${hostname} was not registered — ${reason}`);
+      emit("APPATO_ERROR", { code: "domain_order_failed", message: reason }, true);
+      process.exit(2);
+    }
+    if (order.state === "expired") {
+      console.error(`✗ the order for ${hostname} expired before it was approved`);
+      emit(
+        "APPATO_ERROR",
+        { code: "domain_order_expired", message: "the order expired before it was approved" },
+        true,
+      );
+      process.exit(2);
+    }
+  }
+}
+
+async function domainDetachCmd(org, hostname, json) {
+  const res = await apiFetch(
+    `/api/orgs/${org}/custom-domains/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE" },
+  );
+  const body = /** @type {Wire<HostnameDetach>} */ (await res.json());
+  if (!res.ok) throw apiResponseError(body, `domain detach failed (${res.status})`);
+  if (json) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  console.log(`✓ detached ${body.hostname} (the registration is untouched)`);
+  emit("APPATO_DOMAIN", {
+    hostname: body.hostname,
+    domain: body.domain,
+    state: "detached",
+    app: null,
+    // It stopped serving: there is no URL to hand back.
+    url: null,
+  });
+}
+
+/**
+ * Transfer a domain to another registrar (CD14). One verb, no ticket: the lock
+ * comes off and the auth code is printed for the HUMAN to paste at the gaining
+ * registrar. The code is a bearer credential for the domain — the CLI writes
+ * it to stdout and nowhere else, and the agent must never repeat it into a
+ * file, a log, or a summary.
+ */
+async function domainTransferOutCmd(org, domain, json) {
+  const res = await apiFetch(
+    `/api/orgs/${org}/custom-domains/${encodeURIComponent(domain)}/transfer-out`,
+    { method: "POST" },
+  );
+  const body = /** @type {Wire<DomainTransferOut>} */ (await res.json());
+  if (res.status === 429) throw rateLimited(body);
+  if (!res.ok) throw apiResponseError(body, `domain transfer-out failed (${res.status})`);
+  if (json) {
+    console.log(JSON.stringify(body));
+    return;
+  }
+  console.log(`Transfer authorization code for ${domain}:`);
+  console.log(body.authCode);
+  if (body.lockedUntil !== null) {
+    console.log(
+      `Transfers are blocked until ${new Date(body.lockedUntil).toISOString().slice(0, 10)} — ` +
+        "ICANN's 60-day lock on a new registration. The code is the same one you'll need then.",
+    );
+  }
+  console.log(
+    "Paste it at the registrar you're moving to. Once the transfer completes, appato stops renewing this domain and its hostnames stop serving — your apps stay reachable at their appato.app addresses.",
+  );
+  emit("APPATO_DOMAIN_TRANSFER", {
+    domain,
+    auth_code: body.authCode,
+    locked_until: body.lockedUntil,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // cli/src/email.mjs
 
 function printCapability(org, app, capability) {
@@ -4486,6 +4861,9 @@ function parseSince(raw) {
   throw new Error(`--since expects a duration like 30m, 2h, 7d, or an ms epoch (got "${raw}")`);
 }
 
+/** Resolve after `ms` — the one timer helper (device-login poll, order wait). */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function flagValue(argv, flag) {
   const i = argv.indexOf(flag);
   return i >= 0 ? argv[i + 1] : undefined;
@@ -4538,6 +4916,10 @@ try {
     case "webhook":
     case "webhooks":
       await webhook(args);
+      break;
+    case "domain":
+    case "domains":
+      await domain(args);
       break;
     case "email":
       await emailCommand(args);
