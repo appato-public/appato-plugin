@@ -59,9 +59,9 @@ const IGNORE = new Set([
 ]);
 
 // Cloudflare's real 25 MiB per-asset serving CEILING — a platform constant,
-// so the client may pre-check it (unlike a plan knob, which the server owns:
-// a client literal would wrongly block a plan with a higher limit). The
-// per-source-file size limit is a plan knob (PlanLimits.maxFileBytes), so the
+// so the client may pre-check it (unlike a knob, which the server owns: a
+// client literal would wrongly block a workspace with a higher limit). The
+// per-source-file size limit is a knob (PlanLimits.maxFileBytes), so the
 // server's reject at push is the only enforcement. Refuse, never skip.
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 
@@ -363,6 +363,7 @@ const MACHINE_LINE_CONTRACT = {
     machineString("state"),
     machineString("status", "raw", "active"),
     machineInteger("deletes_at", "none"),
+    machineBoolean("held"),
     machineString("sha"),
     machineString("url"),
   ]),
@@ -520,8 +521,7 @@ usage:
                             (--model: model id of the coding agent driving
                             this push, for telemetry)
   appato history [--json] [--all]  list versions with their change summaries
-                            (newest 50 by default; --all walks every page
-                            your plan's history window retains)
+                            (newest 50 by default; --all walks every page)
   appato show [version] [path] [-o <path>] [--json]
                             read a version without checking it out. No path:
                             its header, composition, and file list (version
@@ -687,7 +687,7 @@ SERVER SDK — import from "./_appato.js" (injected at deploy; never create it)
   if-absent (an atomic claim). A stale rev throws AppatoRevConflictError
   (.code "rev_conflict", .rev = current) — catch it, re-read via entry(),
   retry. That is THE tool for concurrent state machines (turn counters,
-  seat claims, spend ceilings); a plain get -> set loses updates silently.
+  slot claims, spend ceilings); a plain get -> set loses updates silently.
   Never grow one value forever (a log, a history array): every save
   rewrites the whole blob and the 1MB cap is a cliff — append-only data is
   push() entries under a prefix.
@@ -854,12 +854,12 @@ SCHEDULES (cron) — declare in appato.json, handle in your fetch handler
   fire) and missed fires are skipped, never backfilled.
   Test without waiting: appato cron run <name> · appato cron (list/status)
 
-LIMITS (per app; storage sizes are plan-dependent)
-  1MB/value · 100MB total on the default plan — plan-dependent · watch
+LIMITS (per app)
+  1MB/value · 100MB total · watch
   <= 500 entries/prefix (paginate with list/SQL past that) · presence data
   <= 2KB · broadcast <= 32KB
-  files (default plan): 25MB/file · ~1GB/app · 10,000 files/app
-  schedules: plan-dependent (typically 10/app, min 1 min apart)
+  files: 25MB/file · ~1GB/app · 10,000 files/app
+  schedules: 10/app, min 1 min apart
 
 WORKFLOW
   appato status -> sync before editing -> edit -> appato push -m "..."
@@ -1305,8 +1305,8 @@ async function fetchEmailCapability(org, app, verb) {
 
 /**
  * The pushed version whose content sha matches, walking /versions pages to
- * the plan's history wall (same loop as `history --all`, stopping on a hit —
- * the common case costs one page, exactly what a single fetch did). A
+ * the oldest (same loop as `history --all`, stopping on a hit — the common
+ * case costs one page, exactly what a single fetch did). A
  * `clone --version` checkout can sit beyond the newest page (docs/CODE.md
  * "The CLI workflow"), and matching only page one misread it as unpushed local
  * edits. Returns the version row, or null when no version matches.
@@ -1855,7 +1855,7 @@ async function history(args = []) {
   const all = args.includes("--all");
   const { org, app } = appConfig();
   // The server pages at 50 (nextBefore = the id cursor for the next older
-  // page); --all walks the pages until the plan's history window runs out.
+  // page); --all walks the pages back to the first version.
   // The cursor strictly decreases, so this always terminates.
   const versions = [];
   let cursor = 0;
@@ -2358,7 +2358,7 @@ async function cron(args = []) {
 
 /**
  * The Data tool (docs/TOOLS.md "Data"): the operator view over an app's
- * KV + SQL. Scopes are bypassed by design — the builder seat pays for it —
+ * KV + SQL. Scopes are bypassed by design — app-builder access is the gate —
  * and every mutation (and read of someone else's `mine` data) is attributed
  * and logged to the app's timeline server-side. The APPATO_* lines are part
  * of the machine contract (see push above).
@@ -2745,7 +2745,7 @@ Anything else is SQL — end each statement with ;`);
 /**
  * The Files tool (docs/FILES.md, docs/TOOLS.md "The Data tool"): the operator
  * view over the app's uploaded blobs — the file counterpart to `appato data`. Scopes
- * are bypassed the same way (the builder seat pays for it), and every upload,
+ * are bypassed the same way (app-builder access is the gate), and every upload,
  * delete, and read of someone else's `mine` files is attributed and logged to
  * the app's timeline server-side. The APPATO_* lines are part of the machine
  * contract (see push above).
@@ -3474,6 +3474,9 @@ async function status(args = []) {
     latestVersion: body.latestVersion,
     deployedVersion: body.deployedVersion ?? null,
     deployedAt: body.deployedAt ?? null,
+    // The billing overlay (docs/BILLING.md P22): deployed, and still not
+    // serving. Only meaningful on an active app — paused/trashed outrank it.
+    held: body.status === "active" && body.overBudget === true,
     dirty,
     syncState,
     matchesVersion,
@@ -3498,6 +3501,12 @@ async function status(args = []) {
     const countdown =
       days === null ? "" : ` — deletes forever in ${days} day${days === 1 ? "" : "s"}`;
     console.log(`status:   in trash — not serving${countdown}; restore it with: appato restore`);
+  } else if (out.held) {
+    // Only a billing contact can lift the hold, so point at the console.
+    const { host } = await credentials();
+    console.log(
+      `status:   on hold — the workspace reached its billing ceiling or used its free $1; a billing contact can fix it here: ${host}/workspace/${org}/members`,
+    );
   } else {
     console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
   }
@@ -3523,6 +3532,7 @@ async function status(args = []) {
     state: syncState,
     status: body.status,
     deletes_at: body.deletesAt,
+    held: out.held,
     sha: out.localSha,
     url: out.url,
   });
@@ -4154,9 +4164,9 @@ function collectFiles(root) {
         const bytes = readFileSync(full);
         const text = bytes.toString("utf8");
         if (Buffer.from(text, "utf8").equals(bytes)) {
-          // No client-side per-source-file cap: that limit is a plan knob
-          // (PlanLimits.maxFileBytes) the server enforces at push (src/build.ts),
-          // and a client literal would wrongly block a plan with a higher one.
+          // No client-side per-source-file cap: that limit is a server knob
+          // (PlanLimits.maxFileBytes) enforced at push (src/build.ts), and a
+          // client literal would wrongly block a workspace with a higher one.
           files[rel] = text;
         } else {
           if (stats.size > MAX_ASSET_BYTES) {
@@ -4302,8 +4312,8 @@ async function fetchManifest(org, app) {
  * push — it decides how much we send, never whether we can send. A new app
  * has no versions, a network blip has no manifest, and neither is a reason
  * to refuse someone's work; both just mean the push carries the full set,
- * which is what it always used to do. Real problems (no such app, no seat,
- * paused) surface from the push itself, which is the request that
+ * which is what it always used to do. Real problems (no such app, no builder
+ * access, paused) surface from the push itself, which is the request that
  * actually knows.
  *
  * Note this is the opposite call from sync, where a missing manifest was

@@ -295,7 +295,7 @@ below explains what the important results mean.
 | `APPATO_ROLLED_BACK` | `app` `version` `restored` `url` |
 | `APPATO_SHOW` | `app` `version` `files` |
 | `APPATO_SQL` | `app` `rows` `rows_read` `rows_written` `truncated` `write` |
-| `APPATO_STATUS` | `app` `deployed_version` `deployed_at` `dirty` `state` `status` `deletes_at` `sha` `url` |
+| `APPATO_STATUS` | `app` `deployed_version` `deployed_at` `dirty` `state` `status` `deletes_at` `held` `sha` `url` |
 | `APPATO_SYNC_BLOCKED` | `app` `latest_version` `local_sha` |
 | `APPATO_SYNCED` | `app` `version` `changed` `files` `sha` |
 | `APPATO_TABLE` | `name` `rows` `cols` |
@@ -325,12 +325,14 @@ below explains what the important results mean.
   version — run `appato sync` before any further edits.
 - `APPATO_STATUS app=<org>/<slug> deployed_version=<n|none>
   deployed_at=<ms-epoch|never> dirty=<true|false>
-  state=<in_sync|behind|modified> status=<active|paused|trashed> sha=<12-hex>
-  url=<url>` — `behind` means run `appato sync`; `modified` means unpushed
-  local changes — push. `status=paused` means the app is offline
-  (maintenance): every mutation — push, data write, file write, schedule
-  run — is refused with 409. Resume it with `appato resume` (or tell the
-  user to resume it from the app's page in the console), then push.
+  state=<in_sync|behind|modified> status=<active|paused|trashed>
+  held=<true|false> sha=<12-hex> url=<url>` — `behind` means run
+  `appato sync`; `modified` means unpushed local changes — push.
+  `status=paused` means the app is offline (maintenance): every mutation —
+  push, data write, file write, schedule run — is refused with 409. Resume
+  it with `appato resume` (or tell the user to resume it from the app's page
+  in the console), then push. `held=true` means the app is on hold for
+  billing (see "Billing" below): deployed, not serving, nothing lost.
 - `APPATO_PAUSED app=<org>/<slug>` — the app is now paused: offline,
   schedules suspended, data frozen but readable. Fully reversible.
 - `APPATO_RESUMED app=<org>/<slug> url=<url|none>` — a paused app is active
@@ -616,7 +618,7 @@ value identical to the current one still counts as a write (watchers fire).
 
 Keys are plain strings, relative to their scope; use `/`-separated prefixes
 as collections (`messages/`, `votes/`). Values are JSON (≤1MB each; ~100MB
-per app on the default plan — the store cap is plan-dependent). Nothing is
+per app). Nothing is
 reserved — the same key in two scopes is two different values. **Never let
 one value grow without bound** (a game log, a history array, an audit
 trail): every save rewrites the whole blob, and the cap is a cliff the app
@@ -732,8 +734,8 @@ Verbs, per scope (keys are strings, relative to the scope):
   everyone and resolves to **each viewer's own file**.
 
 Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
-even a mis-typed HTML or SVG upload can't script your app. Limits (default
-plan, plan-dependent): **25MB per file, ~1GB per app, 10,000 files**.
+even a mis-typed HTML or SVG upload can't script your app. Limits:
+**25MB per file, ~1GB per app, 10,000 files**.
 
 **Server** (`./_appato.js`):
 
@@ -849,16 +851,16 @@ Behavior worth knowing (don't rebuild any of it):
   whole gap so the history explains itself — that entry is a note, not an
   error, and doesn't count toward the auto-pause.
 - Pausing/resuming lives in the console and CLI, not the manifest — a push
-  won't un-pause something a person deliberately paused. Both need a
-  builder seat, same as pushing.
+  won't un-pause something a person deliberately paused. Both need
+  app-builder access, same as pushing.
 - Schedules are part of the version, so restoring an old version restores
   the schedules that shipped with it. `appato sync` and `appato clone`
   refresh `appato.json`'s `crons` for you — don't hand-edit them to match
   the server, and don't remove entries you didn't mean to delete.
 - The handler can tell a real fire from a test: `getCron(request).trigger`
   is `"schedule"` or `"manual"`.
-- Plans cap how many schedules an app may have and how often they may run;
-  a push that exceeds it fails with the limit in the error.
+- An app may have at most 10 schedules, firing at most once a minute; a push
+  that exceeds either fails with the limit in the error.
 
 ## Email (the app sends and receives its own mail)
 
@@ -969,8 +971,8 @@ Machine lines:
 app's uploaded blobs (images, PDFs, exports), the same R2-backed file plane
 the app's SDK uses, seen from outside the scope rules. Reach for it to see
 what the app actually stored, download a file to check it, replace a bad
-upload, or clear one out. Like the data tool, reads and writes need a builder
-seat, and every upload, delete, and read of someone else's personal (`mine`)
+upload, or clear one out. Like the data tool, reads and writes need
+app-builder access, and every upload, delete, and read of someone else's personal (`mine`)
 files is attributed to the signed-in user and logged to the app's Logs.
 
 - `appato files` — overview: file count + bytes per scope, people with
@@ -1015,3 +1017,15 @@ Machine lines:
 
 `appato status` shows the deploy state and URL. Share the URL with the user
 when a push succeeds — anyone in their company org can open it.
+
+### Billing
+
+Every app is $1 a month with $1 of usage included. `appato create` (and
+`restore`) can refuse with `APPATO_ERROR code=subscription_required` — a
+workspace without a card has exactly one app — or `code=ceiling_reached` —
+a subscribed workspace's ceiling can't cover another app's dollar. Both carry
+an `action_url`: relay it to the user verbatim and stop; never work around
+it (no reusing another app's slug, no trashing apps to make room).
+`held=true` in `APPATO_STATUS` means the app is on hold for billing: it is
+deployed but not serving, nothing is lost, and a billing contact fixes it
+from Workspace → Members → Billing in the console.
