@@ -40,7 +40,7 @@ import { gzipSync } from "node:zlib";
 // GENERATED FILE — do not edit. Derived from cli/src/*.mjs by
 // `npm run build:cli`. `npm run verify` fails when this file is stale.
 
-const BUILD = "7df6456b6fe2";
+const BUILD = "087c523a2365";
 
 // ---------------------------------------------------------------------------
 // cli/src/config.mjs
@@ -4015,7 +4015,7 @@ async function status(args = []) {
     // Only a billing contact can lift the hold, so point at the console.
     const { host } = await credentials();
     console.log(
-      `status:   on hold — the workspace reached its billing ceiling or used its free $1; a billing contact can fix it here: ${host}/workspace/${org}/members`,
+      `status:   on hold — the workspace reached its billing ceiling or used its free $1; a billing contact can fix it here: ${host}/workspace/${org}/billing`,
     );
   } else {
     console.log(`status:   ${out.deployStatus}${out.deployError ? ` (${out.deployError})` : ""}`);
