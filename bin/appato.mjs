@@ -40,7 +40,7 @@ import { gzipSync } from "node:zlib";
 // GENERATED FILE — do not edit. Derived from cli/src/*.mjs by
 // `npm run build:cli`. `npm run verify` fails when this file is stale.
 
-const BUILD = "087c523a2365";
+const BUILD = "bbd49f957f9e";
 
 // ---------------------------------------------------------------------------
 // cli/src/config.mjs
@@ -247,11 +247,7 @@ const MACHINE_LINE_CONTRACT = {
     machineString("checkout_url", "json", "none"),
     machineInteger("expires_at", "none"),
   ]),
-  APPATO_DOMAIN_TRANSFER: machineLine([
-    machineString("domain"),
-    machineString("auth_code", "json"),
-    machineInteger("locked_until", "none"),
-  ]),
+  APPATO_DOMAIN_TRANSFER: machineLine([machineString("domain"), machineString("status")]),
   APPATO_FILE: machineLine(
     [
       machineString("app"),
@@ -616,9 +612,9 @@ usage:
                             stop serving that hostname (the registration is
                             untouched)
   appato domain transfer-out <domain> [--json]
-                            unlock the domain and print the authorization code
-                            for moving it to another registrar (admin/owner;
-                            the code is for the human, never a log or a file)
+                            request a transfer to another registrar
+                            (admin/owner); an operator sends the code to the
+                            registrant
   appato email status [--json]
                             show the app-owned address and inbound/outbound state
   appato email enable|disable inbound|outbound|both
@@ -3267,11 +3263,12 @@ async function webhook(args = []) {
 /**
  * Custom domains (docs/CUSTOM_DOMAINS.md "The interface"). The workspace owns
  * registrations; an app takes ONE hostname under them (CD3). Five verbs: the
- * list, one search per command (never a loop — the registrar rate-limits
- * hard, CD16), `buy` (free and instant on an owned domain, an admin-approved
+ * list, one search per command (never a loop — every check is a live registry
+ * query, CD16), `buy` (free and instant on an owned domain, an admin-approved
  * order otherwise), `detach`, which only ever stops serving a hostname, and
- * `transfer-out`, which hands the customer the code that moves the
- * registration to any other registrar.
+ * `transfer-out`, which RECORDS a request for an operator to fulfil. No auth
+ * code ever crosses this wire, so there is none for the human to type into an
+ * agent.
  *
  * Anchored on the app like `data`/`files`: the org comes from the checkout (or
  * `--app org/slug`), and `buy` attaches to that app.
@@ -3314,9 +3311,9 @@ async function domain(args = []) {
 const money = (cents) => `$${(cents / 100).toFixed(2)}`;
 
 /**
- * The registrar's account-wide lockout (CD16) has no `code` on the wire —
- * just the message and when it lifts — so the CLI names it, and the agent
- * learns "stop searching" from a stable code instead of prose.
+ * The registrar's rate limit (CD16) has no `code` on the wire — just the
+ * message and when it lifts — so the CLI names it, and the agent learns "stop
+ * searching" from a stable code instead of prose.
  */
 function rateLimited(body) {
   const when = typeof body?.retryAt === "number" ? ` — try again ${until(body.retryAt)}` : "";
@@ -3549,11 +3546,11 @@ async function domainDetachCmd(org, hostname, json) {
 }
 
 /**
- * Transfer a domain to another registrar (CD14). One verb, no ticket: the lock
- * comes off and the auth code is printed for the HUMAN to paste at the gaining
- * registrar. The code is a bearer credential for the domain — the CLI writes
- * it to stdout and nowhere else, and the agent must never repeat it into a
- * file, a log, or a summary.
+ * Transfer a domain to another registrar (CD14). The registrar API has no
+ * transfer, unlock or auth-code verb yet, so this RECORDS the request and an
+ * appato operator sends the authorization code to the registrant's email
+ * within ICANN's five days. No code crosses this wire: the agent never sees
+ * one and must never ask the human for one.
  */
 async function domainTransferOutCmd(org, domain, json) {
   const res = await apiFetch(
@@ -3561,28 +3558,22 @@ async function domainTransferOutCmd(org, domain, json) {
     { method: "POST" },
   );
   const body = /** @type {Wire<DomainTransferOut>} */ (await res.json());
-  if (res.status === 429) throw rateLimited(body);
+  // No registrar call happens here any more, so there is no rate limit to
+  // surface — a 409 (not active, or inside ICANN's 60-day lock) carries its
+  // own message, including the date.
   if (!res.ok) throw apiResponseError(body, `domain transfer-out failed (${res.status})`);
   if (json) {
     console.log(JSON.stringify(body));
     return;
   }
-  console.log(`Transfer authorization code for ${domain}:`);
-  console.log(body.authCode);
-  if (body.lockedUntil !== null) {
-    console.log(
-      `Transfers are blocked until ${new Date(body.lockedUntil).toISOString().slice(0, 10)} — ` +
-        "ICANN's 60-day lock on a new registration. The code is the same one you'll need then.",
-    );
-  }
+  console.log(`Transfer-out requested for ${domain}.`);
   console.log(
-    "Paste it at the registrar you're moving to. Once the transfer completes, appato stops renewing this domain and its hostnames stop serving — your apps stay reachable at their appato.app addresses.",
+    "An appato operator will unlock the domain and send the authorization code to the registrant email on file within five business days.",
   );
-  emit("APPATO_DOMAIN_TRANSFER", {
-    domain,
-    auth_code: body.authCode,
-    locked_until: body.lockedUntil,
-  });
+  console.log(
+    "Once the transfer completes, appato stops renewing this domain and its hostnames stop serving — your apps stay reachable at their appato.app addresses.",
+  );
+  emit("APPATO_DOMAIN_TRANSFER", { domain, status: body.status });
 }
 
 // ---------------------------------------------------------------------------

@@ -289,7 +289,7 @@ below explains what the important results mean.
 | `APPATO_DOMAIN` | `hostname` `domain` `state` `app` `url` |
 | `APPATO_DOMAIN_CANDIDATE` | `domain` `available` `price_cents` `renewal_cents` |
 | `APPATO_DOMAIN_ORDER` | `hostname` `domain` `order` `state` `price_cents` `checkout_url` `expires_at` |
-| `APPATO_DOMAIN_TRANSFER` | `domain` `auth_code` `locked_until` |
+| `APPATO_DOMAIN_TRANSFER` | `domain` `status` |
 | `APPATO_EMAIL` | `app` `namespace` `inbound` `outbound` `desired_inbound` `desired_outbound` |
 | `APPATO_EMAIL_MESSAGE` | `app` `id` `direction` `status` `from` `to` `subject` `occurred_at` |
 | `APPATO_EMAIL_READY` | `app` `direction` `enabled` `inbound` `outbound` |
@@ -959,8 +959,8 @@ to the apex. **Check `appato domain` first.** If the workspace already owns the 
 trip; there is no money, no approval, and nothing to wait for.
 
 **Finding a name — brainstorm, then ask ONCE.** You are better at inventing
-names than the registrar's suggestion endpoint, and the registrar
-rate-limits us account-wide, so:
+names than the registrar's suggestion endpoint, and the platform checks up to
+50 names per command in batches, so:
 
 ```
 appato domain search lunchtool.com teamlunch.com lunchapp.io --tld com,app
@@ -969,7 +969,7 @@ appato domain search lunchtool.com teamlunch.com lunchapp.io --tld com,app
 Think up candidates yourself (short, memorable, tied to what the app does —
 up to 50), then check them ALL in **one** `appato domain search` call,
 dotted. Never search in a loop, never one word at a time, and never
-per keystroke — a lockout stops every workspace's search for minutes. Bring
+per keystroke — every check is a live registry query. Bring
 back 3–5 with their prices and let the user pick.
 
 **The human names it and the human approves the money.** Never buy a domain
@@ -1003,8 +1003,8 @@ is untouched and stays the workspace's.
 
 Never print or store a domain's transfer auth code; releases and registrant
 edits are console-only, by a human. `appato domain transfer-out <domain>`
-prints the code for the HUMAN to paste at their new registrar — read it back
-to nobody: never copy it into a file, a commit, a summary, or your own reply.
+records the request; an appato operator sends the authorization code to the
+registrant's email — the agent never sees a code and never asks for one.
 
 ## Email (the app sends and receives its own mail)
 
