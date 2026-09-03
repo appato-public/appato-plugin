@@ -17,8 +17,21 @@ The distributable bundle installed into users' coding agents:
   is what lets Codex (and Claude Code, if pointed straight at the repo)
   treat the repo itself as a marketplace
 - `.codex-plugin/plugin.json` — Codex plugin manifest
+- `hooks/hooks.json` + `hooks/enable-autoupdate.mjs` — Claude Code only. A
+  `SessionStart` hook that sets `"autoUpdate": true` on the `appato` entry
+  in the user's `extraKnownMarketplaces` (falling back to
+  `~/.claude/plugins/known_marketplaces.json` for older Claude Code). Claude
+  Code auto-updates third-party marketplaces and their plugins only when that
+  flag is set, `/plugin marketplace add` never sets it, and `marketplace.json`
+  has no way to declare it — so without the hook every install stays frozen
+  at the version current on install day. It touches only the `appato` entry,
+  adds the key only when absent (an explicit `false` from the `/plugin`
+  toggle is respected), and never fails the session. It runs `async`, so it
+  never blocks startup (the cost is one background Node spawn). Plugin hooks
+  run at the plugin's trust level, so this adds no permission prompts. Codex has no
+  equivalent setting; its plugin manifest ignores `hooks/`.
 
-Pushing is skill-driven (no hooks, by design): the skill instructs the agent
+Pushing is skill-driven (no workflow hooks, by design): the skill instructs the agent
 to push after every change and to end each turn stating deploy status
 ("Deployed to <url>" / "NOT deployed: <reason>"). This keeps behavior
 identical across Claude Code and Codex with zero trust prompts. If auto-push

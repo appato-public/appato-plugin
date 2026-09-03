@@ -2,5 +2,7 @@
 # Claude Code adds plugin bin/ to the Bash tool's PATH (>=2.1.91), making
 # `appato` a bare command while the plugin is enabled. Extensionless files
 # run as CommonJS under node, so this launches the ESM CLI next to it.
+# APPATO_PLUGIN tells the CLI it was launched from a plugin install, where the
+# plugin (auto-update) is the update channel and `appato upgrade` can't reach.
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-exec node "$(dirname "$SELF")/appato.mjs" "$@"
+APPATO_PLUGIN=claude-code exec node "$(dirname "$SELF")/appato.mjs" "$@"

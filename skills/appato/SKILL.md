@@ -12,11 +12,16 @@ allowed-tools: Bash(appato *)
 
 # Building apps on appato
 
-appato hosts small internal-only web apps for the user's company. You write
-the code locally; the `appato` CLI deploys it. Apps are live at
-`https://<app>-<org>.appato.app` and are reachable only by signed-in
-workspace members allowed by that app's workspace/restricted/private access
-policy — never build login screens; the platform handles auth.
+appato hosts small web apps for the user's company — internal by default,
+optionally public. You write the code locally; the `appato` CLI deploys it.
+Apps are live at `https://<app>-<org>.appato.app` and are reachable by
+signed-in workspace members allowed by that app's workspace/restricted/private
+access policy, or, when a workspace admin sets the policy to **Public**, by
+anyone on the paths `appato.json` lists as `public` — and, when the admin also
+opens sign-in, by anyone with an appato account as a **guest**
+(`member: false`). Never build login
+screens or auth checks of your own; the platform handles sign-in and
+identity.
 
 ## How apps live on disk
 
@@ -156,6 +161,12 @@ report appato feedback, skip bootstrap and orientation and go directly to
    - `crons` (optional) declares the app's schedules — see "Scheduled jobs"
      below. Every push syncs the whole array, so removing an entry removes
      the schedule.
+   - `public` (optional) lists the paths anyone on the internet may open —
+     see "Public apps" below: `"public": ["/", "/pricing", "/assets/**",
+     "/api/contact"]`. Glob list: `*` matches within one path segment,
+     `**` whole segments, `["/**"]` = the whole app. Absent = nothing is
+     public. The workspace admin must ALSO set the app's policy to Public
+     in the console; push prints whether the list is actually served.
 5. **Write code** (conventions below), then push and share the printed URL
    with the user.
 6. **Push frequently, always with a change summary.** Run
@@ -209,8 +220,15 @@ report appato feedback, skip bootstrap and orientation and go directly to
    leaving the user unsure whether the live app matches what you built. If
    you changed files but cannot push (not logged in, CLI missing), say so
    and tell the user what's needed.
-10. **If any appato output mentions an upgrade** (or says the CLI is too
-    old), run `appato upgrade`, then retry.
+10. **If appato says a newer version or build is available:** when bare
+    `appato` comes from this plugin (Claude Code), the plugin updates itself
+    within a session or two — do NOT run `appato upgrade` (it writes
+    `~/.appato/bin` and cannot replace the plugin's copy); just tell the user
+    they can run `/plugin marketplace update appato` then `/reload-plugins`
+    to get it now. If the CLI refuses to run as too old, run `appato upgrade`
+    and use `~/.appato/bin/appato` for the rest of the session. For a
+    self-installed copy (Codex, `~/.appato/bin`), run `appato upgrade`, then
+    retry.
 
 ## Reporting platform bugs
 
@@ -267,7 +285,7 @@ below explains what the important results mean.
 | `APPATO_DELETED` | `app` |
 | `APPATO_DEP_BUILDING` | `app` `message` |
 | `APPATO_DEPLOY_FAILED` | `app` `version` `sha` `error` |
-| `APPATO_DEPLOYED` | `app` `version` `sha` `url` |
+| `APPATO_DEPLOYED` | `app` `version` `sha` `url` `public` `policy` |
 | `APPATO_DOMAIN` | `hostname` `domain` `state` `app` `url` |
 | `APPATO_DOMAIN_CANDIDATE` | `domain` `available` `price_cents` `renewal_cents` |
 | `APPATO_DOMAIN_ORDER` | `hostname` `domain` `order` `state` `price_cents` `checkout_url` `expires_at` |
@@ -310,8 +328,13 @@ below explains what the important results mean.
 | `APPATO_WORKSPACE` | `org` `scope` `apps` `checked_out` |
 <!-- machine-contract:end -->
 
-- `APPATO_DEPLOYED app=<org>/<slug> version=<n> sha=<12-hex> url=<url>` —
-  push succeeded; the app is live at `url`.
+- `APPATO_DEPLOYED app=<org>/<slug> version=<n> sha=<12-hex> url=<url>
+  public=<n> policy=<workspace|restricted|private|public>` — push succeeded;
+  the app is live at `url`. `public` counts the paths this version declared
+  public; they are served to anonymous visitors only when `policy=public`
+  (the human lines above say which half is missing). Tell the user when a
+  list they asked for is not served — only a workspace admin can flip the
+  policy, in the console.
 - `APPATO_DEPLOY_FAILED app=<org>/<slug> version=<n> [sha=<12-hex>]
   error=<json-string>` — the code was saved but is NOT live; the previous
   version keeps serving. Fix and push again. (`sha` is present on push
@@ -442,11 +465,17 @@ below explains what the important results mean.
 
   export default {
     async fetch(request: Request): Promise<Response> {
-      const user = requireUser(request); // verified { id, email, name, org }
+      const user = requireUser(request); // verified { id, email, name, org, member }
       return new Response(`Hello ${user.name}`);
     },
   };
   ```
+
+  `requireUser` throws a 401 for an anonymous request. On a public path,
+  `getUser(request)` is `null` for visitors and a full user for signed-in
+  members — branch on it to personalize; `requireMember(request)` refuses
+  anyone who is not a workspace member. Never trust anything the browser
+  sends about who it is — identity comes only from these calls.
 
 - **npm packages: both halves, version written into the import.** There
   is no package.json and no install step — you declare a package by writing
@@ -519,7 +548,7 @@ below explains what the important results mean.
 - For state, use the built-in storage + realtime APIs (next section). Do not
   call external databases unless the user provides one.
 - The `/_appato/*` URL path is reserved by the platform — your fetch handler
-  never sees it; don't route on it.
+  never sees it; don't route on it (and no `public` pattern can expose it).
 - **The app's icon is served for you** — the one you set with `--emoji` /
   `--label` at create (editable in the console). The platform answers
   `/favicon.ico` and `/apple-touch-icon.png` automatically for every app, so a
@@ -540,6 +569,51 @@ below explains what the important results mean.
   keep resolving to that asset; use pathname routes only when the fetch
   handler genuinely serves the shell for every view. Prefer human-readable
   slugs over opaque ids: `/polls/lunch-spot`, not `/poll?id=8f3a2c`.
+
+## Public apps (a marketing page, a signup form, a small public site)
+
+Nothing is public until BOTH halves agree: `appato.json` lists the paths
+under `public`, AND a workspace admin has set the app's policy to Public in
+the console (you cannot do that from the CLI — tell the user). Every other
+path, and every app without both, stays behind the member wall exactly as
+before. What to know when building one:
+
+- **Anonymous requests reach your code with no cookies, no identity headers
+  and no appato credential** — `getUser(request)` is `null`. If the app has
+  its own API keys for a public endpoint, its own bearer scheme works (the
+  platform passes an `Authorization` header it doesn't recognize straight
+  through); appato tokens never reach app code.
+- **Visitors get no data plane.** Storage, files, channels and the browser
+  SDK's verbs all require someone signed in (a member, or a guest within the
+  guest column below). Public data — a contact form,
+  a public leaderboard — is ordinary code in your fetch handler using the
+  server SDK, where you decide what to expose. Files need a signed-in caller
+  too; public images belong in the static bundle.
+- **Sign-in is one call:** `appato.signIn()` in the browser (or a link to
+  `/_appato/login`) sends a visitor through the platform's sign-in and back;
+  the same page then renders personalized because `appato.user` and
+  `getUser()` are set. Never build a login form — guests sign in through the
+  same `appato.signIn()` / `/_appato/login` as members.
+- **Guests.** A workspace admin can additionally let anyone sign in
+  (Governance → Who can sign in → Anyone). Such a person is a `guest`:
+  `getUser()` / `appato.user` carry `member: false`. Guests get `mine`
+  (read + write, their own) and `readonly` (read) and NEVER `shared` or
+  `internal` — the platform refuses, you write no check. Use
+  `requireMember(request)` on routes only coworkers may reach; branch on
+  `user.member` to render a guest view. Presence shows names to everyone in a
+  channel, so think before enabling a roster on a public app.
+- **Users tab.** Builders see everyone who has signed in (members and guests),
+  can block a guest, or remove them and their data, in the console's Users
+  tab. Nothing to build.
+- **Bounds:** anonymous traffic is rate-limited per app and request bodies
+  are capped at 5 MiB; members are never limited. Responses are cacheable —
+  set your own `Cache-Control` on public pages (the platform adds no
+  `no-store` for visitors). Link unfurlers (Slack, iMessage, …) reach a
+  public page directly, so serve your own Open Graph tags there.
+- **Custom domains:** a public app on a custom hostname (`appato domain`)
+  serves its listed paths on that domain — same policy, same `public` list,
+  nothing extra to declare — and `www.{apex}` redirects to the apex.
+
 ## Shared data & realtime
 
 Every app has a private, zero-setup data store and realtime hub — no
@@ -550,12 +624,12 @@ pick who the data belongs to on every call, and the platform enforces it
 using the identity it already verified. You never write an auth check for
 this, and there is no way to reach another scope by spelling a clever key.
 
-| scope | who can read | who can write | reach for it when |
-|---|---|---|---|
-| `shared` | every org member | every org member | **the default.** Team data: messages, votes, rows, settings |
-| `mine` | just that person | just that person | the key belongs to ONE human: drafts, personal settings, a private checklist |
-| `readonly` | every org member | **your server only** | derived or authoritative data clients must not forge: leaderboards, computed summaries, config |
-| `internal` | **your server only** | your server only | browsers must never see it: API keys, audit logs, working state |
+| scope | who can read | who can write | a guest | reach for it when |
+|---|---|---|---|---|
+| `shared` | every org member | every org member | — | **the default.** Team data: messages, votes, rows, settings |
+| `mine` | just that person | just that person | read + write (their own) | the key belongs to ONE human: drafts, personal settings, a private checklist |
+| `readonly` | every org member | **your server only** | read | derived or authoritative data clients must not forge: leaderboards, computed summaries, config |
+| `internal` | **your server only** | your server only | — | browsers must never see it: API keys, audit logs, working state |
 
 Choosing is one question: **whose data is this?** If it's the team's,
 `shared`. If it's one person's, `mine`. If your server computes it, ask
@@ -654,7 +728,11 @@ knows the signed-in user; never build login or ask who the user is):
 <script type="module">
   import { appato } from "/_appato/client.js";
 
-  appato.user;                            // { id, email, name, org } — verified
+  appato.user;                            // { id, email, name, org, member } — verified;
+                                          // null for a visitor on a public path,
+                                          // member: false for a guest
+  appato.signIn();                        // send a visitor through sign-in and back
+                                          // (storage/files/channel throw until signed in)
   const { shared, mine, readonly } = appato.storage;
       // same verbs as the server, per scope. `internal`, `sql` and `forUser`
       // are absent here — they are server-only, so calling one is an error
@@ -713,12 +791,12 @@ generated PDFs, CSV exports. Files use the **same scopes as storage** and the
 same rule (the platform enforces who can reach what, using the identity it
 verified), so there are no signed or unguessable URLs to manage.
 
-| scope | who can read | who can write | reach for it when |
-|---|---|---|---|
-| `shared` | every org member | every org member | team files: a shared photo wall, uploaded docs everyone edits |
-| `mine` | just that person | just that person | one human's file: their avatar, a personal upload |
-| `readonly` | every org member | **your server only** | files your server produces for everyone to download: a generated report |
-| `internal` | **your server only** | your server only | files a browser must never load directly: attachments gated by your own check |
+| scope | who can read | who can write | a guest | reach for it when |
+|---|---|---|---|---|
+| `shared` | every org member | every org member | — | team files: a shared photo wall, uploaded docs everyone edits |
+| `mine` | just that person | just that person | read + write (their own) | one human's file: their avatar, a personal upload |
+| `readonly` | every org member | **your server only** | read | files your server produces for everyone to download: a generated report |
+| `internal` | **your server only** | your server only | — | files a browser must never load directly: attachments gated by your own check |
 
 Verbs, per scope (keys are strings, relative to the scope):
 
@@ -1082,9 +1160,10 @@ Machine lines:
 ## Answering "where is my app?"
 
 `appato status` shows the deploy state and URL. Share the URL with the user
-when a push succeeds — anyone in their company org can open it. If the app
-has a custom hostname, that address takes precedence — use it everywhere
-instead of the `{app}-{org}.appato.app` one (`appato domain` lists them).
+when a push succeeds — anyone in their company org can open it (and, for a
+Public app, anyone at all can open its public paths). If the app has a custom
+hostname, that address takes precedence — use it everywhere instead of the
+`{app}-{org}.appato.app` one (`appato domain` lists them).
 
 ### Billing
 
