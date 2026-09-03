@@ -960,17 +960,33 @@ trip; there is no money, no approval, and nothing to wait for.
 
 **Finding a name — brainstorm, then ask ONCE.** You are better at inventing
 names than the registrar's suggestion endpoint, and the platform checks up to
-50 names per command in batches, so:
+50 names per command in batches, so the loop is yours:
+
+1. **Context first.** The app's name, what it does in one line, the company
+   name, and what `appato domain` already lists. A subdomain of a domain the
+   workspace owns is free and instant — propose `{app}.{owned-domain}` and
+   stop there unless the user asks for a new apex.
+2. **Generate 30–50 candidates on purpose, not by free association:**
+   two-word compounds (`lunchboard`), verb+noun (`pickalunch`), company+app
+   (`acmelunch`), and short invented words. Twelve characters or fewer, no
+   hyphens or digits, pronounceable, nothing near a well-known trademark.
+   Lead with `.com`; `.app`, `.dev`, `.page` and `.fyi` are the fallbacks.
+3. **Check them ALL in one call**, dotted:
 
 ```
-appato domain search lunchtool.com teamlunch.com lunchapp.io --tld com,app
+appato domain search lunchboard.com pickalunch.com acmelunch.com lunchboard.app
 ```
 
-Think up candidates yourself (short, memorable, tied to what the app does —
-up to 50), then check them ALL in **one** `appato domain search` call,
-dotted. Never search in a loop, never one word at a time, and never
-per keystroke — every check is a live registry query. Bring
-back 3–5 with their prices and let the user pick.
+4. **Show 3–5 available ones, best first, with the price, and let the user
+   pick.** If none is good enough, one more round with different patterns —
+   at most two or three rounds in total. Never search in a loop, never one
+   word at a time, never per keystroke: every check is a live registry query.
+
+Every domain is $15/year, registration and renewal, whatever the TLD, so the
+choice is about memorability alone; the search still prints the price so you
+never have to know that. A bare keyword (`appato domain search lunch`) asks
+the registrar for suggestions instead — cached, unimaginative, fine as a
+first pass, never a substitute for step 2.
 
 **The human names it and the human approves the money.** Never buy a domain
 the user didn't name. Prefer a subdomain of a domain they already own;
