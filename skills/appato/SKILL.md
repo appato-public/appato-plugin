@@ -163,10 +163,11 @@ report appato feedback, skip bootstrap and orientation and go directly to
      the schedule.
    - `public` (optional) lists the paths anyone on the internet may open —
      see "Public apps" below: `"public": ["/", "/pricing", "/assets/**",
-     "/api/contact"]`. Glob list: `*` matches within one path segment,
-     `**` whole segments, `["/**"]` = the whole app. Absent = nothing is
-     public. The workspace admin must ALSO set the app's policy to Public
-     in the console; push prints whether the list is actually served.
+     "/api/contact"]`. `*` matches ONE segment, `**` a whole subtree,
+     `["/**"]` = the whole app — grammar and how to verify under "Public
+     apps". Absent = nothing is public. The workspace admin must ALSO set
+     the app's policy to Public in the console; push prints whether the
+     list is actually served.
 5. **Write code** (conventions below), then push and share the printed URL
    with the user.
 6. **Push frequently, always with a change summary.** Run
@@ -578,6 +579,12 @@ the console (you cannot do that from the CLI — tell the user). Every other
 path, and every app without both, stays behind the member wall exactly as
 before. What to know when building one:
 
+- **Patterns are per-segment.** `*` matches ONE path segment, never a `/`:
+  `/vendor/*` serves `/vendor/a.css` but NOT `/vendor/maplibre/a.css`. For a
+  directory tree use `/vendor/**`; `["/**"]` opens the whole app. Verify with
+  a plain `curl` (no cookies, no token) — your own signed-in browser or CLI
+  bypasses the list, so an authenticated 200 proves nothing. A 401 on a path
+  you expected to be public means no pattern matches it.
 - **Anonymous requests reach your code with no cookies, no identity headers
   and no appato credential** — `getUser(request)` is `null`. If the app has
   its own API keys for a public endpoint, its own bearer scheme works (the
