@@ -824,7 +824,7 @@ Verbs, per scope (keys are strings, relative to the scope):
 
 Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
 even a mis-typed HTML or SVG upload can't script your app. Limits:
-**25MB per file, ~1GB per app, 10,000 files**.
+**1GB per file, 10GB per app, 10,000 files**.
 
 **Server** (`./_appato.js`):
 
@@ -835,7 +835,15 @@ const { key } = await files.shared.put("logo.png", bytes, { contentType: "image/
 const list = await files.shared.list("photos/");  // { files: [{ key, size, contentType, by, at }] }
 const doc = await files.forUser(user.id).get("resume.pdf");  // one person's file (no `mine` server-side)
 return await files.readonly.get("nightly-report.pdf");  // serve a server-produced file straight back
+
+// Store a large artifact another service produced — the platform fetches it,
+// the bytes never pass through your worker.
+await files.internal.pull("exports/run-42.parquet", signedUrl, { headers: { authorization: "Bearer …" } });
 ```
+
+`put` with a length-less stream is buffered in your worker and capped at
+25MB; use `pull(key, url)` (https only; the source must send content-length)
+for anything large.
 
 **Browser** (in your served HTML):
 
@@ -1150,7 +1158,7 @@ files is attributed to the signed-in user and logged to the app's Logs.
   refused — binary would garble the terminal).
 - `appato files put <path> [<key>] [--scope ...] [--user ...] [--type <mime>]`
   — upload a local file. Key defaults to the file's basename; content type is
-  inferred from the extension unless `--type` says otherwise. Per-file cap 25MB.
+  inferred from the extension unless `--type` says otherwise.
 - `appato files rm <key> [--scope ...] [--user ...]` — delete one file.
 
 `--scope` and `--user` mean exactly what they do for `appato data` (default
