@@ -834,7 +834,7 @@ import { files } from "./_appato.js";
 const { key } = await files.shared.put("logo.png", bytes, { contentType: "image/png" });
 const list = await files.shared.list("photos/");  // { files: [{ key, size, contentType, by, at }] }
 const doc = await files.forUser(user.id).get("resume.pdf");  // one person's file (no `mine` server-side)
-return await files.readonly.get("nightly-report.pdf");  // serve a server-produced file straight back
+return await files.readonly.get("nightly-report.pdf", { request });  // forwards Range/If-None-Match: seeks and 304s work
 
 // Store a large artifact another service produced — the platform fetches it,
 // the bytes never pass through your worker.
@@ -872,7 +872,7 @@ if (url.pathname.startsWith("/att/")) {
   const me = requireUser(request);
   const dm = await storage.internal.get("att/" + url.pathname.slice(5));
   if (!dm || (me.id !== dm.from && me.id !== dm.to)) return new Response("forbidden", { status: 403 });
-  return (await files.internal.get(dm.fileKey)) ?? new Response("gone", { status: 404 });
+  return (await files.internal.get(dm.fileKey, { request })) ?? new Response("gone", { status: 404 });
 }
 ```
 
