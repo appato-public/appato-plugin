@@ -40,7 +40,7 @@ import { gzipSync } from "node:zlib";
 // GENERATED FILE — do not edit. Derived from cli/src/*.mjs by
 // `npm run build:cli`. `npm run verify` fails when this file is stale.
 
-const BUILD = "7100ae09805a";
+const BUILD = "ad6b8373ccb7";
 
 // ---------------------------------------------------------------------------
 // cli/src/config.mjs
@@ -842,7 +842,7 @@ FILES (uploads) — the SAME scopes, a second verb set, backed by R2
   OWN file (identity is resolved at the wall, not in the URL).
 
   Every served file gets nosniff + a CSP sandbox, so even a mis-typed HTML
-  or SVG upload can't script your app. Limits: 1GB/file, 10GB/app.
+  or SVG upload can't script your app. Limits: 1GB/file, 100GB/app.
 
   Attachments only some people may see = files.internal + your own route:
     // index.ts — a DM attachment, visible to its two participants only
@@ -953,7 +953,7 @@ LIMITS (per app)
   1MB/value · 100MB total · watch
   <= 500 entries/prefix (paginate with list/SQL past that) · presence data
   <= 2KB · broadcast <= 32KB
-  files: 1GB/file · 10GB/app · 10,000 files/app
+  files: 1GB/file · 100GB/app · 10,000 files/app
   schedules: 10/app, min 1 min apart
 
 WORKFLOW

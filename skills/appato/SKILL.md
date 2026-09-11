@@ -824,7 +824,7 @@ Verbs, per scope (keys are strings, relative to the scope):
 
 Every served file carries `nosniff` + a `Content-Security-Policy: sandbox`, so
 even a mis-typed HTML or SVG upload can't script your app. Limits:
-**1GB per file, 10GB per app, 10,000 files**.
+**1GB per file, 100GB per app, 10,000 files**.
 
 **Server** (`./_appato.js`):
 
